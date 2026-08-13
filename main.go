@@ -1,7 +1,8 @@
 // viti-kubevirt adds KubeVirt commands to the viti CLI. vitictl discovers any
 // viti-* binary on PATH as a subcommand, so this binary is reachable as
-// "viti kubevirt ..." — and as "viti kv ..." through the viti-kv symlink the
-// Makefile installs alongside it.
+// "viti kubevirt ..." — and as "viti kv ..." through a viti-kv link, created
+// by "viti plugin install" from the aliases declared in viti's plugin index,
+// or by this repo's "make install" for a source build.
 package main
 
 import (

@@ -4,8 +4,17 @@
 
 `viti-kubevirt` is a viti **plugin**: viti discovers any `viti-*` binary on
 `PATH` and exposes it as a subcommand, so this binary is reachable as
-`viti kubevirt ...` — and as `viti kv ...` through the `viti-kv` symlink it
-installs alongside itself. It also runs standalone as `viti-kubevirt ...`.
+`viti kubevirt ...`, and as `viti kv ...` through a `viti-kv` link beside it.
+It also runs standalone as `viti-kubevirt ...`.
+
+The `kv` alias comes from the `aliases:` field in viti's plugin index, so
+`viti plugin install kubevirt` creates it; `make install` does the same for a
+source build. An older viti that predates index aliases installs only
+`viti-kubevirt` — add the link by hand if you want the shortcut:
+
+```sh
+ln -sf viti-kubevirt "$(dirname "$(command -v viti-kubevirt)")/viti-kv"
+```
 
 It lists Vitistack **Machines** enriched with the state of the KubeVirt
 **VirtualMachine** and **VirtualMachineInstance** backing each one, and drives
