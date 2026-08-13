@@ -1,0 +1,90 @@
+name: Build and Test
+
+on:
+  push:
+    branches: ['*']
+  pull_request:
+    branches: ['main', 'master']
+
+env:
+  GO_VERSION_FILE: go.mod
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Build
+        run: make build
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Lint
+        run: make lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Run tests
+        run: make test
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: cover.out
+          retention-days: 7
+          if-no-files-found: ignore
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Run gosec
+        run: make gosec
+
+      - name: Run govulncheck
+        run: make govulncheck

@@ -1,0 +1,201 @@
+# Release workflow for the viti-kubevirt plugin.
+#
+# The asset names below are load-bearing: `viti plugin install nhn` derives
+# them from vitictl's plugins.yaml defaults, which are
+#
+#   archive:   viti-kubevirt-<tag>-<os>-<arch>.tar.gz
+#   inner:     viti-kubevirt-<tag>-<os>-<arch>/viti-kubevirt
+#   checksums: viti-kubevirt-<tag>-SHA256SUMS
+#   signature: <archive>.cosign.bundle
+#
+# so the index entry needs no overrides. Two consequences worth keeping in
+# mind when editing this file:
+#
+#   * The path of this file is itself part of the contract. The default
+#     cosign identity is
+#     ^https://github.com/<repo>/.github/workflows/release.yml@refs/tags/
+#     so renaming or moving it breaks signature verification on install.
+#   * The installer only understands gzipped tars and expects the inner
+#     binary to be named "viti-kubevirt" on every platform, Windows included —
+#     it appends .exe itself when writing the file. Windows therefore gets a
+#     .tar.gz holding an extensionless binary for the plugin manager, plus a
+#     .zip holding viti-kubevirt.exe for people installing by hand.
+name: Release
+
+# A release can be cut either way:
+#
+#   git tag v0.1.0 && git push origin v0.1.0      -> push event
+#   Releases -> Draft a new release -> Publish    -> release event
+#
+# Publishing from the website with a *new* tag fires both events, while
+# publishing from a tag that already exists fires only the release event —
+# hence both triggers. The concurrency group below collapses the double fire
+# to a single run, and every step is idempotent (assets upload with
+# --clobber), so a re-run is always safe.
+on:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # create the release + upload assets
+  id-token: write # OIDC token for Sigstore keyless signing
+
+env:
+  GO_VERSION_FILE: go.mod
+  # The tag being released. github.ref_name is the tag for both triggers, but
+  # the release payload is read first so the value is unambiguous.
+  VERSION: ${{ github.event.release.tag_name || github.ref_name }}
+
+jobs:
+  build-binaries:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          # For a release published from the website this is the commit the
+          # tag points at; for a tag push it is that same commit.
+          ref: ${{ env.VERSION }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Determine asset name
+        id: names
+        run: echo "asset=viti-kubevirt-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build viti-kubevirt
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: make build
+
+      - name: Stage archive contents
+        run: |
+          mkdir -p "dist/${{ steps.names.outputs.asset }}"
+          # Deliberately extensionless, including on Windows: the plugin
+          # installer looks for an inner path of "viti-kubevirt" and adds .exe
+          # itself when it writes the file to disk.
+          cp bin/viti-kubevirt "dist/${{ steps.names.outputs.asset }}/viti-kubevirt"
+          cp README.md LICENSE "dist/${{ steps.names.outputs.asset }}/"
+
+      - name: Package (tar.gz)
+        working-directory: dist
+        run: tar -czf "${{ steps.names.outputs.asset }}.tar.gz" "${{ steps.names.outputs.asset }}"
+
+      - name: Package (zip, Windows only — for manual installs)
+        if: matrix.goos == 'windows'
+        working-directory: dist
+        run: |
+          cp "${{ steps.names.outputs.asset }}/viti-kubevirt" "${{ steps.names.outputs.asset }}/viti-kubevirt.exe"
+          rm "${{ steps.names.outputs.asset }}/viti-kubevirt"
+          zip -r "${{ steps.names.outputs.asset }}.zip" "${{ steps.names.outputs.asset }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/${{ steps.names.outputs.asset }}.tar.gz
+            dist/${{ steps.names.outputs.asset }}.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish Release
+    needs: [build-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: Create aggregated checksum file
+        working-directory: dist
+        run: sha256sum *.tar.gz *.zip > "viti-kubevirt-${VERSION}-SHA256SUMS"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign archives (Sigstore keyless)
+        working-directory: dist
+        env:
+          COSIGN_YES: "true"
+        run: |
+          for f in *.tar.gz *.zip; do
+            [ -f "$f" ] || continue
+            cosign sign-blob --bundle "${f}.cosign.bundle" "$f"
+          done
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          REPO="${{ github.repository }}"
+          ASSETS=(*.tar.gz *.zip *.cosign.bundle "viti-kubevirt-${VERSION}-SHA256SUMS")
+
+          # Publishing a draft release from the website is what creates the
+          # tag, which is what triggers this run — so the release can be
+          # seconds old, and GitHub's releases-by-tag endpoint is served from
+          # replicas that briefly disagree about whether it exists. A single
+          # 404 there would throw away an already-signed build, so retry
+          # instead of failing.
+          publish() {
+            if gh release view "$VERSION" --repo "$REPO" > /dev/null 2>&1; then
+              # Uploading leaves existing release notes — hand-written ones
+              # included — untouched.
+              echo "Release $VERSION already exists, uploading assets..."
+              gh release upload "$VERSION" --repo "$REPO" --clobber "${ASSETS[@]}"
+            else
+              echo "Creating release $VERSION..."
+              gh release create "$VERSION" --repo "$REPO" \
+                --generate-notes --latest "${ASSETS[@]}"
+            fi
+          }
+
+          for attempt in 1 2 3 4 5; do
+            if publish; then
+              echo "published $VERSION"
+              exit 0
+            fi
+            delay=$(( attempt * 5 ))
+            echo "attempt $attempt failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          echo "::error::could not publish release $VERSION after 5 attempts"
+          exit 1
