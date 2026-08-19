@@ -183,3 +183,15 @@ func TestPatchVMResourcesWithoutTemplate(t *testing.T) {
 		t.Fatal("expected an error for a VM without a template, got nil")
 	}
 }
+
+// The operator's safeUintToUint32 only guards overflow, so a class with
+// cores: 0 yields 0 — this must not "helpfully" substitute a default the
+// operator would not use.
+func TestDesiredResourcesZeroCoresMirrorsOperator(t *testing.T) {
+	class := machineClass("odd", true)
+	class.Spec.CPU.Cores = 0
+	got := DesiredResources(&vitiv1alpha1.Machine{}, class)
+	if got.Cores != 0 {
+		t.Errorf("cores = %d, want 0 (the operator passes 0 through)", got.Cores)
+	}
+}

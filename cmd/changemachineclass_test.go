@@ -1,14 +1,22 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 
+	"github.com/vitistack/vitictl-kubevirt/internal/config"
+	"github.com/vitistack/vitictl-kubevirt/internal/kube"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
 )
 
@@ -105,5 +113,67 @@ func TestChangeSummaryWithoutCurrentClass(t *testing.T) {
 	got := changeSummary(m, class, vm.DesiredResources(m, class))
 	if !strings.Contains(got, "large") {
 		t.Errorf("changeSummary = %q, missing new class", got)
+	}
+}
+
+func fakeAZ(t *testing.T, objs ...ctrlclient.Object) *kube.VitistackClient {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := vitiv1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
+	return &kube.VitistackClient{AZ: config.AvailabilityZone{Name: "az1"}, Ctrl: c}
+}
+
+// Naming the machine's current class must re-sync the VM, not exit early:
+// a hand-edited spec.machineClass whose VM was never resized is exactly the
+// drift this command exists to repair.
+func TestChooseClassCurrentClassIsAResync(t *testing.T) {
+	class := &vitiv1alpha1.MachineClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "large"},
+		Spec: vitiv1alpha1.MachineClassSpec{
+			Enabled: true,
+			Memory:  vitiv1alpha1.MachineClassMemorySpec{Quantity: resource.MustParse("8Gi")},
+			CPU:     vitiv1alpha1.MachineClassCPUSpec{Cores: 4},
+		},
+	}
+	found := vm.Located{
+		AZ: fakeAZ(t, class),
+		Machine: &vitiv1alpha1.Machine{
+			ObjectMeta: metav1.ObjectMeta{Name: "web-1", Namespace: "prod"},
+			Spec:       vitiv1alpha1.MachineSpec{MachineClass: "large"},
+		},
+	}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	got, err := chooseClass(cmd, context.Background(), found, "large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Name != "large" {
+		t.Fatalf("chooseClass returned %v, want the current class back for a re-sync", got)
+	}
+}
+
+// A cluster discovered from the control plane has no local kubeconfig, so
+// virtctl cannot restart it — the command must say so and leave the change
+// pending rather than fail after already applying it, and must not hint at
+// a retry command that would hit the same wall.
+func TestMaybeRestartOnDiscoveredClusterExplainsInsteadOfFailing(t *testing.T) {
+	kv := &kube.KubeVirtClient{Cluster: config.Cluster{Name: "admin@kv1"}}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(""))
+
+	if err := maybeRestart(cmd, kv, "prod", "web-1", true, false); err != nil {
+		t.Fatalf("maybeRestart error = %v, want nil (the resize is already applied)", err)
+	}
+	if !strings.Contains(out.String(), "config add") {
+		t.Errorf("output does not tell the user how to make the cluster restartable:\n%s", out.String())
 	}
 }

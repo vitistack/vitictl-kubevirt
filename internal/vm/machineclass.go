@@ -162,16 +162,20 @@ func PatchVMResources(ctx context.Context, kv *kube.KubeVirtClient, v *kubevirtv
 }
 
 // uintToUint32 and intToUint32 mirror the operator's bounds-checked
-// conversions, falling back rather than wrapping on out-of-range values.
+// conversions exactly, falling back rather than wrapping on out-of-range
+// values. uintToUint32 passes zero through, as safeUintToUint32 does — a
+// class with cores: 0 must size the VM the way the operator would, not the
+// way a default would. The comparisons go through uint64/int64 so the
+// MaxUint32 constant stays representable on 32-bit platforms.
 func uintToUint32(v uint, fallback uint32) uint32 {
-	if v == 0 || v > math.MaxUint32 {
+	if uint64(v) > math.MaxUint32 {
 		return fallback
 	}
 	return uint32(v) // #nosec G115 -- bounds checked above
 }
 
 func intToUint32(v int, fallback uint32) uint32 {
-	if v <= 0 || v > math.MaxUint32 {
+	if v <= 0 || int64(v) > math.MaxUint32 {
 		return fallback
 	}
 	return uint32(v) // #nosec G115 -- bounds checked above

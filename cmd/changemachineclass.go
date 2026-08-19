@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -68,6 +69,13 @@ func runChangeClass(cmd *cobra.Command, s *scope, name, className string,
 	doRestart, noRestart, assumeYes bool) error {
 	ctx := contextOrBackground(cmd)
 
+	// resolver() first, like every sibling command: it also defaults
+	// s.namespace from the configured default cluster, which selectMachine
+	// then narrows by.
+	resolver, err := s.resolver()
+	if err != nil {
+		return err
+	}
 	found, err := selectMachine(cmd, s, name)
 	if err != nil {
 		return err
@@ -82,17 +90,9 @@ func runChangeClass(cmd *cobra.Command, s *scope, name, className string,
 	if err != nil {
 		return err
 	}
-	if class == nil {
-		// Choosing the current class is a decision, not a failure.
-		return nil
-	}
 
 	// Resolve the VM before writing anything, so a machine whose VM is gone
 	// fails cleanly instead of leaving the Machine renamed and nothing sized.
-	resolver, err := s.resolver()
-	if err != nil {
-		return err
-	}
 	kv, err := resolver.For(ctx, found.AZ, found.ConfigName)
 	if err != nil {
 		return fmt.Errorf("availability zone %q: %w", found.AZ.AZ.Name, err)
@@ -118,11 +118,20 @@ func runChangeClass(cmd *cobra.Command, s *scope, name, className string,
 		}
 	}
 
+	// Captured before the patch: the typed client's Patch decodes the server
+	// response back into m, so afterwards m already carries the new class.
+	oldClass := m.Spec.MachineClass
+
 	if err := vm.PatchMachineClass(ctx, found.AZ, m, class.Name); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "✅ machine %s/%s: class %s → %s\n",
-		m.Namespace, m.Name, dash(m.Spec.MachineClass), class.Name)
+	if oldClass == class.Name {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "✅ machine %s/%s: class %s (re-synced)\n",
+			m.Namespace, m.Name, class.Name)
+	} else {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "✅ machine %s/%s: class %s → %s\n",
+			m.Namespace, m.Name, dash(oldClass), class.Name)
+	}
 
 	if err := vm.PatchVMResources(ctx, kv, vmObj, res); err != nil {
 		return fmt.Errorf("the Machine's class was already changed, but sizing its VM failed: %w\n"+
@@ -136,8 +145,12 @@ func runChangeClass(cmd *cobra.Command, s *scope, name, className string,
 }
 
 // chooseClass resolves the class to change to: the named one when --class was
-// given, otherwise an interactive pick over the enabled classes. It returns
-// nil when the choice is the machine's current class, which is a no-op.
+// given, otherwise an interactive pick over the enabled classes.
+//
+// The machine's current class is a valid choice, not a no-op: the operator
+// never resizes an existing VM, so a hand-edited spec.machineClass whose VM
+// was never sized to match is repaired by "changing" to the class it already
+// names — a re-sync.
 func chooseClass(cmd *cobra.Command, ctx context.Context, found vm.Located, className string) (*vitiv1alpha1.MachineClass, error) {
 	classes, err := vm.ListEnabledClasses(ctx, found.AZ)
 	if err != nil {
@@ -146,13 +159,12 @@ func chooseClass(cmd *cobra.Command, ctx context.Context, found vm.Located, clas
 	current := found.Machine.Spec.MachineClass
 
 	if className != "" {
-		if className == current {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "machine %s/%s already has class %q — nothing to do\n",
-				found.Machine.Namespace, found.Machine.Name, current)
-			return nil, nil
-		}
 		for i := range classes {
 			if classes[i].Name == className {
+				if className == current {
+					warn(cmd, fmt.Errorf("machine %s/%s already has class %q — re-syncing the VM to it",
+						found.Machine.Namespace, found.Machine.Name, current))
+				}
 				return &classes[i], nil
 			}
 		}
@@ -164,16 +176,10 @@ func chooseClass(cmd *cobra.Command, ctx context.Context, found vm.Located, clas
 		return nil, errors.New("no class given — pass one with --class, " +
 			"or run in a terminal to pick one interactively")
 	}
-	candidates := make([]vitiv1alpha1.MachineClass, 0, len(classes))
-	for _, c := range classes {
-		if c.Name != current {
-			candidates = append(candidates, c)
-		}
-	}
-	if len(candidates) == 0 {
+	if len(classes) == 0 {
 		return nil, fmt.Errorf("zone %q has no enabled kubevirt machine class to change to", found.AZ.AZ.Name)
 	}
-	return pickClass(cmd, candidates)
+	return pickClass(cmd, classes)
 }
 
 func pickClass(cmd *cobra.Command, classes []vitiv1alpha1.MachineClass) (*vitiv1alpha1.MachineClass, error) {
@@ -212,6 +218,15 @@ func pickClass(cmd *cobra.Command, classes []vitiv1alpha1.MachineClass) (*vitiv1
 // or having no terminal to ask on — leaves the change pending with a hint,
 // because a resize someone may want to schedule must not force a reboot.
 func maybeRestart(cmd *cobra.Command, kv *kube.KubeVirtClient, namespace, name string, doRestart, noRestart bool) error {
+	// A cluster discovered from the control plane has no local kubeconfig,
+	// and virtctl needs one — the sizing is applied either way, so explain
+	// how to make the cluster restartable rather than fail (or hint at a
+	// "vm restart" that would hit the same wall).
+	if _, _, err := kv.VirtctlTarget(); err != nil {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(),
+			"💤 not restarted — the new size applies when the VM next restarts. %v\n", err)
+		return nil
+	}
 	restart := doRestart
 	if !doRestart && !noRestart {
 		if !picker.Interactive() {
@@ -264,7 +279,10 @@ func completeClasses(s *scope) func(*cobra.Command, []string, string) ([]string,
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		ctx := contextOrBackground(cmd)
+		// Completion must never hang the shell: one unreachable zone would
+		// otherwise block the Tab press for client-go's full dial timeout.
+		ctx, cancel := context.WithTimeout(contextOrBackground(cmd), 2*time.Second)
+		defer cancel()
 		clients, err := kube.ConnectVitistack(ctx, zones, nil)
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
