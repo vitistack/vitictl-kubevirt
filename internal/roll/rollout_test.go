@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	corev1 "k8s.io/api/core/v1"
-	kubevirtv1 "kubevirt.io/api/core/v1"
 	"k8s.io/utils/ptr"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 )
 
 // rollableMember is a stagable member whose VMI already reports the desired
