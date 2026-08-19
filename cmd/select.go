@@ -50,11 +50,11 @@ func selectMachine(cmd *cobra.Command, s *scope, name string) (vm.Located, error
 			return vm.Located{}, fmt.Errorf("no machines found in any availability zone%s",
 				inNamespace(s.namespace))
 		}
-		return vm.Located{}, fmt.Errorf(
+		return vm.Located{}, &noMachineError{msg: fmt.Sprintf(
 			"no machine named %q found in any availability zone%s — if that is a KubeVirt "+
 				"VirtualMachine name rather than a Machine name, name its cluster with "+
 				"--cluster to act on it directly",
-			name, inNamespace(s.namespace))
+			name, inNamespace(s.namespace))}
 	}
 
 	if !picker.Interactive() {
@@ -179,6 +179,12 @@ func pickVM(cmd *cobra.Command, kv *kube.KubeVirtClient, namespace string) (*kub
 	echo(cmd, kv.Cluster.Name+"/"+got.Namespace+"/"+got.Name)
 	return got, nil
 }
+
+// noMachineError is the named-machine miss, typed so changemachineclass can
+// try the name as a KubernetesCluster before giving up.
+type noMachineError struct{ msg string }
+
+func (e *noMachineError) Error() string { return e.msg }
 
 // firstArg returns the machine name a command was given, or "" when it was
 // left out so one can be picked interactively.
