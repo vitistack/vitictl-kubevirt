@@ -18,7 +18,9 @@ import (
 )
 
 func newVMChangeClassCmd(s *scope) *cobra.Command {
-	var className string
+	var className, nodepool string
+	var controlplane bool
+	var drainTimeout time.Duration
 	var doRestart, noRestart, assumeYes bool
 
 	cmd := &cobra.Command{
@@ -50,11 +52,30 @@ This needs the Vitistack control plane, so --cluster cannot be used here.`,
 				return errors.New("--cluster skips the Vitistack control plane, but the machine " +
 					"class lives there — run again without --cluster")
 			}
-			return runChangeClass(cmd, s, firstArg(args), className, doRestart, noRestart, assumeYes)
+			opts := rolloutFlags{
+				class: className, nodepool: nodepool, controlplane: controlplane,
+				drainTimeout: drainTimeout, noRestart: noRestart,
+				skipConfirm: assumeYes || doRestart,
+			}
+			if nodepool != "" || controlplane {
+				if firstArg(args) == "" {
+					return errors.New("--nodepool and --controlplane roll a KubernetesCluster — name one " +
+						"(e.g. 'viti kubevirt vm changemachineclass my-cluster --nodepool workers1')")
+				}
+				return runRollout(cmd, s, firstArg(args), opts)
+			}
+			return runChangeClass(cmd, s, firstArg(args), className, doRestart, noRestart, assumeYes, opts)
 		},
 	}
 	cmd.Flags().StringVar(&className, "class", "",
 		"machine class to change to (default: pick interactively)")
+	cmd.Flags().StringVar(&nodepool, "nodepool", "",
+		"roll a whole nodepool of the named KubernetesCluster, one node at a time")
+	cmd.Flags().BoolVar(&controlplane, "controlplane", false,
+		"roll the named KubernetesCluster's control plane, one node at a time")
+	cmd.Flags().DurationVar(&drainTimeout, "drain-timeout", 5*time.Minute,
+		"how long one node's drain may take before the rollout aborts")
+	cmd.MarkFlagsMutuallyExclusive("nodepool", "controlplane")
 	cmd.Flags().BoolVar(&doRestart, "restart", false,
 		"restart the VM afterwards without asking")
 	cmd.Flags().BoolVar(&noRestart, "no-restart", false,
@@ -66,7 +87,7 @@ This needs the Vitistack control plane, so --cluster cannot be used here.`,
 }
 
 func runChangeClass(cmd *cobra.Command, s *scope, name, className string,
-	doRestart, noRestart, assumeYes bool) error {
+	doRestart, noRestart, assumeYes bool, opts rolloutFlags) error {
 	ctx := contextOrBackground(cmd)
 
 	// resolver() first, like every sibling command: it also defaults
@@ -78,6 +99,13 @@ func runChangeClass(cmd *cobra.Command, s *scope, name, className string,
 	}
 	found, err := selectMachine(cmd, s, name)
 	if err != nil {
+		// The name may be a KubernetesCluster rather than a Machine — typing
+		// a cluster opens the choice of its controlplane and nodepools.
+		if name != "" && isNotFound(err) {
+			if rerr, handled := tryClusterRollout(cmd, s, name, opts); handled {
+				return rerr
+			}
+		}
 		return err
 	}
 	m := found.Machine
@@ -88,6 +116,9 @@ func runChangeClass(cmd *cobra.Command, s *scope, name, className string,
 
 	class, err := chooseClass(cmd, ctx, found, className)
 	if err != nil {
+		return err
+	}
+	if err := refuseOwned(m, m.Spec.MachineClass, class.Name); err != nil {
 		return err
 	}
 
