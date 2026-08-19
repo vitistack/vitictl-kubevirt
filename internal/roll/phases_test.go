@@ -84,7 +84,8 @@ func (r *recordingReporter) Step(format string, args ...any) {
 func (r *recordingReporter) Warn(error) {}
 
 // stagableMember builds a member whose VM lives in a fake KubeVirt cluster.
-func stagableMember(t *testing.T, name string) Member {
+// extra objects (a VMI, typically) are seeded into the same cluster.
+func stagableMember(t *testing.T, name string, extra ...ctrlclient.Object) Member {
 	t.Helper()
 	m := poolMachine(name, "worker", "workers1", "c1-id")
 	vmObj := &kubevirtv1.VirtualMachine{
@@ -97,7 +98,8 @@ func stagableMember(t *testing.T, name string) Member {
 			},
 		},
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(vmObj).Build()
+	objs := append([]ctrlclient.Object{vmObj}, extra...)
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
 	kv := &kube.KubeVirtClient{
 		Cluster: config.Cluster{Name: "kv1", Kubeconfig: "/tmp/kc", Context: "ctx"},
 		Ctrl:    c,
