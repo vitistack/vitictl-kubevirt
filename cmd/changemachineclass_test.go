@@ -18,6 +18,7 @@ import (
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
 	"github.com/vitistack/vitictl-kubevirt/internal/roll"
+	"github.com/vitistack/vitictl-kubevirt/internal/virtctl"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
 )
 
@@ -288,5 +289,22 @@ func TestRollSummary(t *testing.T) {
 	}
 	if got := rollSummary(cpPlan); !strings.Contains(got, "unavailable") {
 		t.Errorf("single-replica controlplane must warn about the API outage: %q", got)
+	}
+}
+
+// The virtctl binary must be checked BEFORE any disruption: discovering it is
+// missing after the control plane is already drained is exactly the stranding
+// preflight exists to prevent.
+func TestEnsureVirtctl(t *testing.T) {
+	orig := virtctl.Binary
+	virtctl.Binary = "definitely-not-a-real-binary-anywhere"
+	defer func() { virtctl.Binary = orig }()
+
+	if err := ensureVirtctl(false); err == nil {
+		t.Fatal("want an error when virtctl is missing and a restart is planned")
+	}
+	// --no-restart never invokes virtctl, so its absence must not block staging.
+	if err := ensureVirtctl(true); err != nil {
+		t.Fatalf("staging without restart must not need virtctl, got %v", err)
 	}
 }

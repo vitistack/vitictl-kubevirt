@@ -18,6 +18,7 @@ import (
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
 	"github.com/vitistack/vitictl-kubevirt/internal/picker"
 	"github.com/vitistack/vitictl-kubevirt/internal/roll"
+	"github.com/vitistack/vitictl-kubevirt/internal/virtctl"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
 )
 
@@ -157,6 +158,9 @@ func rolloutOn(cmd *cobra.Command, s *scope, az *kube.VitistackClient, targets [
 	}
 	g := &guest.Client{Clientset: clientset, DrainTimeout: opts.drainTimeout, ErrOut: cmd.ErrOrStderr()}
 
+	if err := ensureVirtctl(opts.noRestart); err != nil {
+		return err
+	}
 	if err := roll.Preflight(ctx, plan, g); err != nil {
 		return err
 	}
@@ -308,6 +312,18 @@ func rollSummary(p *roll.Plan) string {
 		s += " — the cluster API will be unavailable while its only control-plane node reboots"
 	}
 	return s
+}
+
+// ensureVirtctl verifies the restart tool exists before anything is drained.
+// Discovering a missing virtctl after a node's pods are already evicted is
+// exactly the stranding preflight exists to prevent; --no-restart never
+// invokes virtctl, so staging stays possible without it.
+func ensureVirtctl(noRestart bool) error {
+	if noRestart {
+		return nil
+	}
+	_, err := virtctl.Path()
+	return err
 }
 
 // cmdReporter prints rollout progress: steps to stderr so structured stdout
