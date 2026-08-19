@@ -146,7 +146,7 @@ control plane. That is the path to use when Vitistack is down: lifecycle
 actions and the consoles then need nothing but the KubeVirt cluster.`,
 	}
 	s.register(cmd)
-	cmd.AddCommand(newVMListCmd(s), newVMGetCmd(s))
+	cmd.AddCommand(newVMListCmd(s), newVMGetCmd(s), newVMChangeClassCmd(s))
 	for _, a := range vmActions() {
 		cmd.AddCommand(newVMActionCmd(s, a))
 	}
