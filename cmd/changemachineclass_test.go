@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -22,7 +25,6 @@ import (
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
 	"github.com/vitistack/vitictl-kubevirt/internal/roll"
-	"github.com/vitistack/vitictl-kubevirt/internal/virtctl"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
 )
 
@@ -215,12 +217,23 @@ func TestChooseClassCurrentClassIsAResync(t *testing.T) {
 	}
 }
 
-// A cluster discovered from the control plane has no local kubeconfig, so
-// virtctl cannot restart it — the command must say so and leave the change
-// pending rather than fail after already applying it, and must not hint at
-// a retry command that would hit the same wall.
-func TestMaybeRestartOnDiscoveredClusterExplainsInsteadOfFailing(t *testing.T) {
-	kv := &kube.KubeVirtClient{Cluster: config.Cluster{Name: "admin@kv1"}}
+// restart() goes through KubeVirt's subresource API now, not virtctl, so a
+// cluster discovered from the control plane — with no local kubeconfig at
+// all — must restart exactly like one the user configured by hand. This is
+// the case that used to fail preflight with "not in your local configuration"
+// before the API restart existed.
+func TestMaybeRestartOnDiscoveredClusterSucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("method = %s, want PUT", r.Method)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// No Kubeconfig/Context: exactly the "discovered, never locally
+	// configured" cluster VirtctlTarget used to refuse.
+	kv := &kube.KubeVirtClient{Cluster: config.Cluster{Name: "admin@kv1"}, RESTConfig: &rest.Config{Host: srv.URL}}
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
@@ -228,10 +241,35 @@ func TestMaybeRestartOnDiscoveredClusterExplainsInsteadOfFailing(t *testing.T) {
 	cmd.SetIn(strings.NewReader(""))
 
 	if err := maybeRestart(cmd, kv, "prod", "web-1", true, false); err != nil {
-		t.Fatalf("maybeRestart error = %v, want nil (the resize is already applied)", err)
+		t.Fatalf("maybeRestart error = %v, want nil", err)
 	}
-	if !strings.Contains(out.String(), "config add") {
-		t.Errorf("output does not tell the user how to make the cluster restartable:\n%s", out.String())
+	if !strings.Contains(out.String(), "✅ restart prod/web-1") {
+		t.Errorf("output does not confirm the restart:\n%s", out.String())
+	}
+}
+
+// A failed restart must not be silently swallowed: the class change already
+// landed, so the error has to say that and point at the retry command rather
+// than surface a bare API failure.
+func TestMaybeRestartWrapsAnAPIFailureWithARetryHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	kv := &kube.KubeVirtClient{Cluster: config.Cluster{Name: "kv1"}, RESTConfig: &rest.Config{Host: srv.URL}}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(""))
+
+	err := maybeRestart(cmd, kv, "prod", "web-1", true, false)
+	if err == nil {
+		t.Fatal("maybeRestart error = nil, want the API failure surfaced")
+	}
+	if !strings.Contains(err.Error(), "class change is applied") || !strings.Contains(err.Error(), "vm restart web-1") {
+		t.Errorf("err = %q, want it to say the class change stuck and name the retry command", err)
 	}
 }
 
@@ -479,15 +517,5 @@ func TestRolloutOptionsOnlyYesSkipsConfirmation(t *testing.T) {
 	opts = rolloutOptions("large", "workers1", false, time.Minute, false, false, true)
 	if !opts.skipConfirm {
 		t.Error("--yes did not skip the confirmation")
-	}
-}
-
-func TestEnsureVirtctl(t *testing.T) {
-	orig := virtctl.Binary
-	virtctl.Binary = "definitely-not-a-real-binary-anywhere"
-	defer func() { virtctl.Binary = orig }()
-
-	if err := ensureVirtctl(); err == nil {
-		t.Fatal("want an error when virtctl is missing and a restart is planned")
 	}
 }

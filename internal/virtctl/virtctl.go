@@ -5,7 +5,10 @@
 // controller-runtime client, and reimplementing them would mean speaking
 // KubeVirt's subresource API and, for VNC, proxying a websocket to a local
 // viewer. virtctl already does exactly that and ships with KubeVirt, so this
-// plugin drives it rather than duplicating it.
+// plugin drives it rather than duplicating it — with one exception: restart
+// is a plain PUT with no streaming involved, cheap enough to reimplement, and
+// doing so drops virtctl's kubeconfig-path requirement for it. See package
+// kubevirt for that one.
 package virtctl
 
 import (

@@ -18,9 +18,9 @@ import (
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/guest"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
+	"github.com/vitistack/vitictl-kubevirt/internal/kubevirt"
 	"github.com/vitistack/vitictl-kubevirt/internal/picker"
 	"github.com/vitistack/vitictl-kubevirt/internal/roll"
-	"github.com/vitistack/vitictl-kubevirt/internal/virtctl"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
 )
 
@@ -328,7 +328,7 @@ func rolloutOn(cmd *cobra.Command, s *scope, az *kube.VitistackClient, targets [
 	}
 
 	restart := func(ctx context.Context, m roll.Member) error {
-		return runVirtctl(cmd, m.KV, "restart", m.VM.Namespace, m.VM.Name)
+		return kubevirt.Restart(ctx, m.KV, m.VM.Namespace, m.VM.Name)
 	}
 	if err := roll.Roll(ctx, plan, g, restart, rollOpts, rep); err != nil {
 		return err
@@ -339,18 +339,18 @@ func rolloutOn(cmd *cobra.Command, s *scope, az *kube.VitistackClient, targets [
 }
 
 // prepareRestart wires everything the restart half of a rollout needs: the
-// virtctl binary, the guest cluster client (for cordon/drain/node waits), and
-// the preflight over both. With --no-restart none of that is needed — staging
-// only writes sizes into templates — so it is skipped entirely: a cluster
-// discovered from the control plane (no local kubeconfig, maybe no reachable
-// guest secret) must stay stageable.
+// guest cluster client (for cordon/drain/node waits) and the preflight over
+// it. Restarting itself needs no separate readiness check — it goes through
+// KubeVirt's subresource API on the client already held for each member, not
+// virtctl — so there is nothing to verify here beyond the guest cluster.
+// With --no-restart none of that is needed — staging only writes sizes into
+// templates — so it is skipped entirely: a cluster discovered from the
+// control plane (no local kubeconfig, maybe no reachable guest secret) must
+// stay stageable.
 func prepareRestart(ctx context.Context, cmd *cobra.Command, az *kube.VitistackClient,
 	plan *roll.Plan, opts rolloutFlags) (roll.Guest, error) {
 	if opts.noRestart {
 		return nil, nil
-	}
-	if err := ensureVirtctl(); err != nil {
-		return nil, err
 	}
 	secret, err := guest.FindClusterSecret(ctx, az.Ctrl, plan.Target.Cluster.Namespace, plan.ClusterID)
 	if err != nil {
@@ -448,15 +448,6 @@ func rollSummary(p *roll.Plan) string {
 		s += " — the cluster API will be unavailable while its only control-plane node reboots"
 	}
 	return s
-}
-
-// ensureVirtctl verifies the restart tool exists before anything is drained.
-// Discovering a missing virtctl after a node's pods are already evicted is
-// exactly the stranding preflight exists to prevent. Only restarting needs
-// it: prepareRestart skips this (with everything else) under --no-restart.
-func ensureVirtctl() error {
-	_, err := virtctl.Path()
-	return err
 }
 
 // cmdReporter prints rollout progress: steps to stderr so structured stdout
