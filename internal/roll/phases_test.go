@@ -122,13 +122,17 @@ func TestPreflightPasses(t *testing.T) {
 	}
 }
 
-func TestPreflightCatchesUnrestartableCluster(t *testing.T) {
+// A cluster with no local kubeconfig used to fail Preflight outright, back
+// when restarting went through virtctl and virtctl needed one. Restart now
+// goes through the KubeVirt API on the client already held for the member,
+// so this must pass — failing it here is exactly the bug that sent users to
+// run "config add" just to satisfy a tool the restart path no longer uses.
+func TestPreflightPassesWithoutLocalKubeconfig(t *testing.T) {
 	m := stagableMember(t, "wrk0")
-	m.KV.Cluster = config.Cluster{Name: "discovered-only"} // no kubeconfig → virtctl impossible
+	m.KV.Cluster = config.Cluster{Name: "discovered-only"} // no kubeconfig, no context
 	plan := &Plan{Class: sizedClass(), Members: []Member{m}}
-	err := Preflight(context.Background(), plan, newFakeGuest("wrk0"))
-	if err == nil || !strings.Contains(err.Error(), "discovered-only") {
-		t.Fatalf("err = %v, want virtctl-target failure naming the cluster", err)
+	if err := Preflight(context.Background(), plan, newFakeGuest("wrk0")); err != nil {
+		t.Fatalf("Preflight() error = %v, want nil — restart no longer needs virtctl", err)
 	}
 }
 

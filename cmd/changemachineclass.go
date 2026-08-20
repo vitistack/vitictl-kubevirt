@@ -13,6 +13,7 @@ import (
 
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
+	"github.com/vitistack/vitictl-kubevirt/internal/kubevirt"
 	"github.com/vitistack/vitictl-kubevirt/internal/picker"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
 )
@@ -261,16 +262,12 @@ func pickClass(cmd *cobra.Command, classes []vitiv1alpha1.MachineClass) (*vitiv1
 // --restart, never with --no-restart, and after asking otherwise. Declining —
 // or having no terminal to ask on — leaves the change pending with a hint,
 // because a resize someone may want to schedule must not force a reboot.
+//
+// The restart itself goes through KubeVirt's subresource API (package
+// kubevirt), not virtctl, so it needs nothing beyond the client already held
+// for kv — including for a cluster that was only ever discovered from the
+// Vitistack control plane and has no local kubeconfig.
 func maybeRestart(cmd *cobra.Command, kv *kube.KubeVirtClient, namespace, name string, doRestart, noRestart bool) error {
-	// A cluster discovered from the control plane has no local kubeconfig,
-	// and virtctl needs one — the sizing is applied either way, so explain
-	// how to make the cluster restartable rather than fail (or hint at a
-	// "vm restart" that would hit the same wall).
-	if _, _, err := kv.VirtctlTarget(); err != nil {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-			"💤 not restarted — the new size applies when the VM next restarts. %v\n", err)
-		return nil
-	}
 	restart := doRestart
 	if !doRestart && !noRestart {
 		if !picker.Interactive() {
@@ -288,7 +285,7 @@ func maybeRestart(cmd *cobra.Command, kv *kube.KubeVirtClient, namespace, name s
 			"💤 not restarted — the new size applies when the VM restarts (viti kubevirt vm restart %s)\n", name)
 		return nil
 	}
-	if err := runVirtctl(cmd, kv, "restart", namespace, name); err != nil {
+	if err := kubevirt.Restart(contextOrBackground(cmd), kv, namespace, name); err != nil {
 		return fmt.Errorf("the class change is applied, but the restart failed: %w\n"+
 			"Restart later with 'viti kubevirt vm restart %s'", err, name)
 	}

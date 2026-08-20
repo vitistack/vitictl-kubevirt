@@ -9,16 +9,15 @@ import (
 )
 
 // Preflight verifies a rollout can finish before it starts: every member's
-// VM must be restartable (virtctl needs a local kubeconfig) and its node must
-// exist in the guest cluster. A rollout that would strand half a pool resized
-// but unrebootable must fail here, with nothing written.
+// node must exist in the guest cluster, so cordon+drain has something to act
+// on. Restarting the VM itself needs nothing checked here — it goes through
+// KubeVirt's subresource API on the client already held for m.KV, not
+// virtctl, so there is no local-kubeconfig precondition left to fail on. A
+// rollout that would strand half a pool resized but with nowhere to drain to
+// must fail here, with nothing written.
 func Preflight(ctx context.Context, plan *Plan, g Guest) error {
 	var problems []error
 	for _, m := range plan.Members {
-		if _, _, err := m.KV.VirtctlTarget(); err != nil {
-			problems = append(problems, fmt.Errorf("machine %q cannot be restarted: %w", m.Machine.Name, err))
-			continue
-		}
 		if _, err := g.Node(ctx, m.Machine.Name); err != nil {
 			problems = append(problems, fmt.Errorf("machine %q: guest cluster: %w", m.Machine.Name, err))
 		}

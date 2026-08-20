@@ -13,6 +13,7 @@ import (
 
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
+	"github.com/vitistack/vitictl-kubevirt/internal/kubevirt"
 	"github.com/vitistack/vitictl-kubevirt/internal/output"
 	"github.com/vitistack/vitictl-kubevirt/internal/viticli"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
@@ -301,7 +302,20 @@ and skips the control plane entirely.`,
 					return errCancelled
 				}
 			}
-			if err := runVirtctl(cmd, t.KV, a.verb, t.VM.Namespace, t.VM.Name, extra...); err != nil {
+			// restart goes straight through KubeVirt's subresource API rather
+			// than virtctl: it needs nothing virtctl provides (no local
+			// kubeconfig, no binary on PATH), and the plugin already holds an
+			// authenticated client for the cluster. The rest stay on virtctl —
+			// pause/unpause/soft-reboot are VirtualMachineInstance
+			// subresources with their own paths and semantics, and start/stop
+			// /reset map cleanly enough to virtctl that duplicating them buys
+			// nothing yet.
+			if a.verb == "restart" {
+				err = kubevirt.Restart(contextOrBackground(cmd), t.KV, t.VM.Namespace, t.VM.Name)
+			} else {
+				err = runVirtctl(cmd, t.KV, a.verb, t.VM.Namespace, t.VM.Name, extra...)
+			}
+			if err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "✅ %s %s/%s\n", a.verb, t.VM.Namespace, t.VM.Name)
