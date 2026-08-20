@@ -1,6 +1,6 @@
 module github.com/vitistack/vitictl-kubevirt
 
-go 1.26.5
+go 1.26.6
 
 require (
 	github.com/gizak/termui/v3 v3.1.0
