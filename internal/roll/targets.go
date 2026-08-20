@@ -26,7 +26,12 @@ func LoadTargets(ctx context.Context, az *kube.VitistackClient, namespace, clust
 	if err != nil {
 		return nil, err
 	}
+	return Targets(cluster), nil
+}
 
+// Targets returns a cluster's rollable targets: the control plane first, then
+// the nodepools in spec order.
+func Targets(cluster *vitiv1alpha1.KubernetesCluster) []Target {
 	out := []Target{{
 		Cluster:  cluster,
 		Kind:     KindControlPlane,
@@ -43,7 +48,7 @@ func LoadTargets(ctx context.Context, az *kube.VitistackClient, namespace, clust
 			PoolIndex: i,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // findCluster fetches the cluster by name, searching every namespace when

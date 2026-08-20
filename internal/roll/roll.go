@@ -21,13 +21,16 @@ import (
 )
 
 const (
-	// LabelClusterID links machines and secrets to their cluster.
-	LabelClusterID = "vitistack.io/clusterid"
+	// LabelClusterID links machines and secrets to their cluster. Aliased from
+	// vitistack/common rather than restated, so an upstream rename cannot
+	// silently drift this away from what the operators actually stamp.
+	LabelClusterID = vitiv1alpha1.ClusterIdAnnotation
 	// AnnotationNodepool names the nodepool a machine belongs to.
-	AnnotationNodepool = "vitistack.io/nodepool"
+	AnnotationNodepool = vitiv1alpha1.NodePoolAnnotation
 	// LabelNodeRole distinguishes control-plane machines from workers.
-	LabelNodeRole = "vitistack.io/node-role"
-	// RoleControlPlane is LabelNodeRole's value for control-plane machines.
+	LabelNodeRole = vitiv1alpha1.NodeRoleAnnotation
+	// RoleControlPlane is LabelNodeRole's value for control-plane machines
+	// (common exports no constant for the value).
 	RoleControlPlane = "control-plane"
 )
 

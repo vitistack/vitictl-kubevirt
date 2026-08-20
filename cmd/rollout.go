@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	kubevirtv1 "kubevirt.io/api/core/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 
@@ -30,6 +32,19 @@ type rolloutFlags struct {
 	drainTimeout time.Duration
 	noRestart    bool
 	skipConfirm  bool
+}
+
+// rolloutOptions derives a rollout's flags from the command line. Only an
+// explicit --yes skips the whole-pool confirmation: --restart pre-answers the
+// per-VM restart question in single-machine mode (a roll restarts regardless)
+// and must never silently authorise cordoning and rebooting a whole pool.
+func rolloutOptions(className, nodepool string, controlplane bool, drainTimeout time.Duration,
+	_ /* doRestart */, noRestart, assumeYes bool) rolloutFlags {
+	return rolloutFlags{
+		class: className, nodepool: nodepool, controlplane: controlplane,
+		drainTimeout: drainTimeout, noRestart: noRestart,
+		skipConfirm: assumeYes,
+	}
 }
 
 // isNotFound reports whether selectMachine failed only because no machine has
@@ -106,14 +121,139 @@ func findClusterTargets(cmd *cobra.Command, s *scope, name string) (*kube.Vitist
 	if err != nil {
 		return nil, nil, err
 	}
+	return scanZonesForCluster(ctx, clients, s.namespace, name, func(e error) { warn(cmd, e) })
+}
+
+// runRolloutPick is the cluster-first entry point: no cluster was named, so
+// one is picked interactively, then its target, class, and the normal
+// confirm → roll pipeline. The picker spans every configured zone; -n narrows
+// it only when given explicitly, because a namespace defaulted from the
+// KubeVirt cluster config would silently hide most of the fleet.
+func runRolloutPick(cmd *cobra.Command, s *scope, opts rolloutFlags) error {
+	if !picker.Interactive() {
+		return errors.New("name the KubernetesCluster to roll " +
+			"(e.g. 'viti kubevirt vm changemachineclass my-cluster --controlplane'), " +
+			"or run in a terminal to pick one interactively")
+	}
+	explicitNS := s.namespace // before resolver() defaults it
+	if _, err := s.resolver(); err != nil {
+		return err
+	}
+	zones, err := config.AvailabilityZones(s.az)
+	if err != nil {
+		return err
+	}
+	ctx := contextOrBackground(cmd)
+	clients, err := kube.ConnectVitistack(ctx, zones, func(e error) { warn(cmd, e) })
+	if err != nil {
+		return err
+	}
+	hits := listClusters(ctx, clients, explicitNS, func(e error) { warn(cmd, e) })
+	if len(hits) == 0 {
+		return errors.New("no kubernetesclusters found in any reachable availability zone")
+	}
+	hit, err := pickCluster(cmd, hits)
+	if err != nil {
+		return err
+	}
+	return rolloutOn(cmd, s, hit.az, roll.Targets(hit.cluster), opts)
+}
+
+// clusterHit is one pickable KubernetesCluster and the zone it lives in.
+type clusterHit struct {
+	az      *kube.VitistackClient
+	cluster *vitiv1alpha1.KubernetesCluster
+}
+
+// listClusters enumerates the KubernetesClusters of every zone, tolerating
+// broken zones with a warning like every other fleet listing. namespace
+// narrows the listing when non-empty.
+func listClusters(ctx context.Context, clients []*kube.VitistackClient,
+	namespace string, warnf func(error)) []clusterHit {
+	var hits []clusterHit
 	for _, az := range clients {
-		targets, err := roll.LoadTargets(ctx, az, s.namespace, name)
+		var list vitiv1alpha1.KubernetesClusterList
+		var listOpts []ctrlclient.ListOption
+		if namespace != "" {
+			listOpts = append(listOpts, ctrlclient.InNamespace(namespace))
+		}
+		if err := az.Ctrl.List(ctx, &list, listOpts...); err != nil {
+			warnf(fmt.Errorf("zone %q: listing kubernetesclusters: %w", az.AZ.Name, err))
+			continue
+		}
+		for i := range list.Items {
+			hits = append(hits, clusterHit{az: az, cluster: &list.Items[i]})
+		}
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		a, b := hits[i].cluster, hits[j].cluster
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		return a.Name < b.Name
+	})
+	return hits
+}
+
+// pickCluster opens the interactive picker over the clusters found.
+func pickCluster(cmd *cobra.Command, hits []clusterHit) (clusterHit, error) {
+	items := make([]picker.Item, 0, len(hits))
+	for i := range hits {
+		h := &hits[i]
+		pools := make([]string, 0, len(h.cluster.Spec.Topology.Workers.NodePools))
+		for _, p := range h.cluster.Spec.Topology.Workers.NodePools {
+			pools = append(pools, p.Name)
+		}
+		columns := []string{
+			h.cluster.Name, h.cluster.Namespace, h.az.AZ.Name,
+			dash(h.cluster.Spec.Topology.ControlPlane.MachineClass),
+			dash(strings.Join(pools, ",")),
+		}
+		items = append(items, picker.Item{
+			Label:   strings.Join(columns, " "),
+			Columns: columns,
+			Value:   h,
+		})
+	}
+	chosen, err := picker.Select(" Select a kubernetescluster ",
+		[]string{"NAME", "NAMESPACE", "AZ", "CP CLASS", "NODEPOOLS"}, items)
+	if err != nil {
+		if errors.Is(err, picker.ErrCancelled) {
+			return clusterHit{}, errCancelled
+		}
+		return clusterHit{}, err
+	}
+	got, ok := chosen.Value.(*clusterHit)
+	if !ok {
+		return clusterHit{}, fmt.Errorf("picker returned an unexpected item %T", chosen.Value)
+	}
+	echo(cmd, got.cluster.Name)
+	return *got, nil
+}
+
+// scanZonesForCluster searches each zone for the named KubernetesCluster,
+// tolerating broken zones the way machine listings do: an unreadable zone
+// (missing CRD, denied RBAC, API down) is warned about and skipped, so it
+// cannot block rolling a cluster that lives in a healthy zone. A cluster
+// found nowhere stays ErrClusterNotFound — that keeps the machine-name
+// fallback's original guidance intact — with the unreadable zones named,
+// since the cluster may live in one of them.
+func scanZonesForCluster(ctx context.Context, clients []*kube.VitistackClient,
+	namespace, name string, warnf func(error)) (*kube.VitistackClient, []roll.Target, error) {
+	var unreadable []string
+	for _, az := range clients {
+		targets, err := roll.LoadTargets(ctx, az, namespace, name)
 		if err == nil {
 			return az, targets, nil
 		}
 		if !errors.Is(err, roll.ErrClusterNotFound) {
-			return nil, nil, err
+			unreadable = append(unreadable, az.AZ.Name)
+			warnf(fmt.Errorf("zone %q could not be searched for kubernetescluster %q: %w", az.AZ.Name, name, err))
 		}
+	}
+	if len(unreadable) > 0 {
+		return nil, nil, fmt.Errorf("%w: %q in any reachable availability zone (zone %s could not be read — it may live there)",
+			roll.ErrClusterNotFound, name, strings.Join(unreadable, ", "))
 	}
 	return nil, nil, fmt.Errorf("%w: %q in any availability zone", roll.ErrClusterNotFound, name)
 }
@@ -148,20 +288,8 @@ func rolloutOn(cmd *cobra.Command, s *scope, az *kube.VitistackClient, targets [
 		return err
 	}
 
-	secret, err := guest.FindClusterSecret(ctx, az.Ctrl, plan.Target.Cluster.Namespace, plan.ClusterID)
+	g, err := prepareRestart(ctx, cmd, az, plan, opts)
 	if err != nil {
-		return err
-	}
-	clientset, err := guest.Connect(secret)
-	if err != nil {
-		return err
-	}
-	g := &guest.Client{Clientset: clientset, DrainTimeout: opts.drainTimeout, ErrOut: cmd.ErrOrStderr()}
-
-	if err := ensureVirtctl(opts.noRestart); err != nil {
-		return err
-	}
-	if err := roll.Preflight(ctx, plan, g); err != nil {
 		return err
 	}
 
@@ -208,6 +336,36 @@ func rolloutOn(cmd *cobra.Command, s *scope, az *kube.VitistackClient, targets [
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "✅ rolled %d machine(s) of %s/%s %s to class %s\n",
 		len(plan.Members), target.Cluster.Namespace, target.Cluster.Name, target.Describe(), class.Name)
 	return nil
+}
+
+// prepareRestart wires everything the restart half of a rollout needs: the
+// virtctl binary, the guest cluster client (for cordon/drain/node waits), and
+// the preflight over both. With --no-restart none of that is needed — staging
+// only writes sizes into templates — so it is skipped entirely: a cluster
+// discovered from the control plane (no local kubeconfig, maybe no reachable
+// guest secret) must stay stageable.
+func prepareRestart(ctx context.Context, cmd *cobra.Command, az *kube.VitistackClient,
+	plan *roll.Plan, opts rolloutFlags) (roll.Guest, error) {
+	if opts.noRestart {
+		return nil, nil
+	}
+	if err := ensureVirtctl(); err != nil {
+		return nil, err
+	}
+	secret, err := guest.FindClusterSecret(ctx, az.Ctrl, plan.Target.Cluster.Namespace, plan.ClusterID)
+	if err != nil {
+		return nil, err
+	}
+	clientset, err := guest.Connect(secret)
+	if err != nil {
+		return nil, err
+	}
+	g := &guest.Client{Clientset: clientset, DrainTimeout: opts.drainTimeout, ErrOut: cmd.ErrOrStderr()}
+
+	if err := roll.Preflight(ctx, plan, g); err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 // chooseTarget resolves which part of the cluster to roll: by flag, or by an
@@ -273,33 +431,11 @@ func poolNames(targets []roll.Target) []string {
 	return out
 }
 
-// chooseRollClass picks the class to roll to, mirroring chooseClass but for a
-// pool: the current class is a valid choice (a whole-pool re-sync).
+// chooseRollClass picks the class to roll to, sharing resolveClass with the
+// single-machine path: the current class is a valid choice (a whole-pool
+// re-sync).
 func chooseRollClass(cmd *cobra.Command, ctx context.Context, az *kube.VitistackClient, t roll.Target, className string) (*vitiv1alpha1.MachineClass, error) {
-	classes, err := vm.ListEnabledClasses(ctx, az)
-	if err != nil {
-		return nil, err
-	}
-	if className != "" {
-		for i := range classes {
-			if classes[i].Name == className {
-				if className == t.Class {
-					warn(cmd, fmt.Errorf("%s already has class %q — re-syncing and rolling anyway", t.Describe(), className))
-				}
-				return &classes[i], nil
-			}
-		}
-		return nil, fmt.Errorf("machine class %q is not an enabled kubevirt class in zone %q (valid: %s)",
-			className, az.AZ.Name, strings.Join(classNames(classes), ", "))
-	}
-	if !picker.Interactive() {
-		return nil, errors.New("no class given — pass one with --class, " +
-			"or run in a terminal to pick one interactively")
-	}
-	if len(classes) == 0 {
-		return nil, fmt.Errorf("zone %q has no enabled kubevirt machine class", az.AZ.Name)
-	}
-	return pickClass(cmd, classes)
+	return resolveClass(cmd, ctx, az, className, t.Class, t.Describe(), "re-syncing and rolling anyway")
 }
 
 // rollSummary renders what the rollout is about to do, for the confirmation.
@@ -316,12 +452,9 @@ func rollSummary(p *roll.Plan) string {
 
 // ensureVirtctl verifies the restart tool exists before anything is drained.
 // Discovering a missing virtctl after a node's pods are already evicted is
-// exactly the stranding preflight exists to prevent; --no-restart never
-// invokes virtctl, so staging stays possible without it.
-func ensureVirtctl(noRestart bool) error {
-	if noRestart {
-		return nil
-	}
+// exactly the stranding preflight exists to prevent. Only restarting needs
+// it: prepareRestart skips this (with everything else) under --no-restart.
+func ensureVirtctl() error {
 	_, err := virtctl.Path()
 	return err
 }

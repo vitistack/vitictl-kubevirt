@@ -19,7 +19,7 @@ import (
 
 func newVMChangeClassCmd(s *scope) *cobra.Command {
 	var className, nodepool string
-	var controlplane bool
+	var controlplane, rollout bool
 	var drainTimeout time.Duration
 	var doRestart, noRestart, assumeYes bool
 
@@ -42,6 +42,11 @@ list" shows the same set). A Machine carrying its own spec.cpu or spec.memory
 keeps those values — they override any class, so changing the class alone
 will not resize such a machine.
 
+--rollout is cluster-first: pick a KubernetesCluster, then its control plane
+or a nodepool, then the class — the pool is rolled one node at a time with
+cordon+drain. --nodepool/--controlplane without a name open the same cluster
+picker with the target already decided.
+
 This needs the Vitistack control plane, so --cluster cannot be used here.`,
 		Example: `  viti kubevirt vm changemachineclass
   viti kubevirt vm cmc my-vm
@@ -52,15 +57,13 @@ This needs the Vitistack control plane, so --cluster cannot be used here.`,
 				return errors.New("--cluster skips the Vitistack control plane, but the machine " +
 					"class lives there — run again without --cluster")
 			}
-			opts := rolloutFlags{
-				class: className, nodepool: nodepool, controlplane: controlplane,
-				drainTimeout: drainTimeout, noRestart: noRestart,
-				skipConfirm: assumeYes || doRestart,
-			}
-			if nodepool != "" || controlplane {
+			opts := rolloutOptions(className, nodepool, controlplane, drainTimeout,
+				doRestart, noRestart, assumeYes)
+			if nodepool != "" || controlplane || rollout {
 				if firstArg(args) == "" {
-					return errors.New("--nodepool and --controlplane roll a KubernetesCluster — name one " +
-						"(e.g. 'viti kubevirt vm changemachineclass my-cluster --nodepool workers1')")
+					// Cluster-first: pick the cluster interactively, then its
+					// target — or, off a terminal, be told to name one.
+					return runRolloutPick(cmd, s, opts)
 				}
 				return runRollout(cmd, s, firstArg(args), opts)
 			}
@@ -73,6 +76,8 @@ This needs the Vitistack control plane, so --cluster cannot be used here.`,
 		"roll a whole nodepool of the named KubernetesCluster, one node at a time")
 	cmd.Flags().BoolVar(&controlplane, "controlplane", false,
 		"roll the named KubernetesCluster's control plane, one node at a time")
+	cmd.Flags().BoolVar(&rollout, "rollout", false,
+		"roll a KubernetesCluster's control plane or nodepool — pick the cluster, target and class interactively")
 	cmd.Flags().DurationVar(&drainTimeout, "drain-timeout", 5*time.Minute,
 		"how long one node's drain may take before the rollout aborts")
 	cmd.MarkFlagsMutuallyExclusive("nodepool", "controlplane")
@@ -175,32 +180,40 @@ func runChangeClass(cmd *cobra.Command, s *scope, name, className string,
 	return maybeRestart(cmd, kv, vmObj.Namespace, vmObj.Name, doRestart, noRestart)
 }
 
-// chooseClass resolves the class to change to: the named one when --class was
-// given, otherwise an interactive pick over the enabled classes.
+// chooseClass resolves the class a single machine changes to.
 //
 // The machine's current class is a valid choice, not a no-op: the operator
 // never resizes an existing VM, so a hand-edited spec.machineClass whose VM
 // was never sized to match is repaired by "changing" to the class it already
 // names — a re-sync.
 func chooseClass(cmd *cobra.Command, ctx context.Context, found vm.Located, className string) (*vitiv1alpha1.MachineClass, error) {
-	classes, err := vm.ListEnabledClasses(ctx, found.AZ)
+	subject := fmt.Sprintf("machine %s/%s", found.Machine.Namespace, found.Machine.Name)
+	return resolveClass(cmd, ctx, found.AZ, className,
+		found.Machine.Spec.MachineClass, subject, "re-syncing the VM to it")
+}
+
+// resolveClass picks the class to change to from the zone's enabled classes:
+// the named one when --class was given (naming the current class warns with
+// resyncNote rather than exiting — a re-sync is a repair, not a no-op),
+// otherwise an interactive pick.
+func resolveClass(cmd *cobra.Command, ctx context.Context, az *kube.VitistackClient,
+	className, current, subject, resyncNote string) (*vitiv1alpha1.MachineClass, error) {
+	classes, err := vm.ListEnabledClasses(ctx, az)
 	if err != nil {
 		return nil, err
 	}
-	current := found.Machine.Spec.MachineClass
 
 	if className != "" {
 		for i := range classes {
 			if classes[i].Name == className {
 				if className == current {
-					warn(cmd, fmt.Errorf("machine %s/%s already has class %q — re-syncing the VM to it",
-						found.Machine.Namespace, found.Machine.Name, current))
+					warn(cmd, fmt.Errorf("%s already has class %q — %s", subject, current, resyncNote))
 				}
 				return &classes[i], nil
 			}
 		}
 		return nil, fmt.Errorf("machine class %q is not an enabled kubevirt class in zone %q (valid: %s)",
-			className, found.AZ.AZ.Name, strings.Join(classNames(classes), ", "))
+			className, az.AZ.Name, strings.Join(classNames(classes), ", "))
 	}
 
 	if !picker.Interactive() {
@@ -208,7 +221,7 @@ func chooseClass(cmd *cobra.Command, ctx context.Context, found vm.Located, clas
 			"or run in a terminal to pick one interactively")
 	}
 	if len(classes) == 0 {
-		return nil, fmt.Errorf("zone %q has no enabled kubevirt machine class to change to", found.AZ.AZ.Name)
+		return nil, fmt.Errorf("zone %q has no enabled kubevirt machine class to change to", az.AZ.Name)
 	}
 	return pickClass(cmd, classes)
 }

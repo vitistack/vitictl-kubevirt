@@ -14,13 +14,17 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 )
 
 const (
 	// KeyKubeConfig is the secret key holding the guest cluster's kubeconfig.
 	KeyKubeConfig = "kube.config"
-	// LabelClusterID links secrets and machines to their cluster.
-	LabelClusterID = "vitistack.io/clusterid"
+	// LabelClusterID links secrets and machines to their cluster. Aliased from
+	// vitistack/common rather than restated, so an upstream rename cannot
+	// silently drift this away from what the operators actually stamp.
+	LabelClusterID = vitiv1alpha1.ClusterIdAnnotation
 )
 
 // FindClusterSecret locates the Secret holding a cluster's config artifacts:

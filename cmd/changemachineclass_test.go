@@ -3,15 +3,19 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	vitiv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 
@@ -124,8 +128,59 @@ func fakeAZ(t *testing.T, objs ...ctrlclient.Object) *kube.VitistackClient {
 	if err := vitiv1alpha1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
 	return &kube.VitistackClient{AZ: config.AvailabilityZone{Name: "az1"}, Ctrl: c}
+}
+
+// --no-restart stages sizes and never drains, restarts, or waits on nodes, so
+// it must not require what only restarting needs: the guest cluster's
+// kubeconfig secret, a local virtctl target, or virtctl itself. A cluster
+// discovered from the control plane (no local kubeconfig entry) is exactly
+// where staged-only rollouts are the documented workflow.
+func TestPrepareRestartIsSkippedEntirelyWithNoRestart(t *testing.T) {
+	az := fakeAZ(t)                      // deliberately no guest kubeconfig secret
+	discovered := &kube.KubeVirtClient{} // no local entry: VirtctlTarget errors
+	plan := &roll.Plan{
+		Target: roll.Target{Cluster: &vitiv1alpha1.KubernetesCluster{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "c1"},
+		}},
+		ClusterID: "c1-id",
+		Members: []roll.Member{{
+			Machine: &vitiv1alpha1.Machine{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "wrk0"}},
+			KV:      discovered,
+		}},
+	}
+	cmd := &cobra.Command{}
+	cmd.SetErr(&bytes.Buffer{})
+
+	g, err := prepareRestart(context.Background(), cmd, az, plan, rolloutFlags{noRestart: true})
+	if err != nil {
+		t.Fatalf("prepareRestart with --no-restart = %v, want nil: staging needs no guest access", err)
+	}
+	if g != nil {
+		t.Errorf("prepareRestart with --no-restart returned a guest client, want none")
+	}
+}
+
+// Without --no-restart the same missing secret must still fail, before
+// anything is written.
+func TestPrepareRestartStillRequiresTheGuestSecret(t *testing.T) {
+	az := fakeAZ(t)
+	plan := &roll.Plan{
+		Target: roll.Target{Cluster: &vitiv1alpha1.KubernetesCluster{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "c1"},
+		}},
+		ClusterID: "c1-id",
+	}
+	cmd := &cobra.Command{}
+	cmd.SetErr(&bytes.Buffer{})
+
+	if _, err := prepareRestart(context.Background(), cmd, az, plan, rolloutFlags{}); err == nil {
+		t.Fatal("prepareRestart without a guest secret succeeded, want an error")
+	}
 }
 
 // Naming the machine's current class must re-sync the VM, not exit early:
@@ -295,16 +350,144 @@ func TestRollSummary(t *testing.T) {
 // The virtctl binary must be checked BEFORE any disruption: discovering it is
 // missing after the control plane is already drained is exactly the stranding
 // preflight exists to prevent.
+// The cluster-first flow: --rollout declares "I want to roll a cluster's
+// control plane or a nodepool" without naming anything up front — the cluster
+// is picked interactively, then the target, then the class.
+func TestChangeMachineClassHelpDocumentsRollout(t *testing.T) {
+	out, _, err := run(t, "vm", "changemachineclass", "--help")
+	if err != nil {
+		t.Fatalf("run(vm changemachineclass --help) error = %v", err)
+	}
+	if !strings.Contains(out, "--rollout") {
+		t.Errorf("help does not document --rollout:\n%s", out)
+	}
+}
+
+// The picker takes over the terminal, so a piped or CI invocation must be
+// told to name its cluster rather than left hanging on a UI that cannot be
+// drawn — and it must fail before opening any zone connection.
+func TestRolloutWithoutNameRefusedOffTerminal(t *testing.T) {
+	isolate(t)
+	_, _, err := run(t, "vm", "changemachineclass", "--rollout", "--yes")
+	if err == nil {
+		t.Fatal("expected an error for --rollout without a name off-terminal")
+	}
+	if !strings.Contains(err.Error(), "cluster") {
+		t.Errorf("error should tell the user to name a KubernetesCluster, got: %v", err)
+	}
+}
+
+// One broken zone must not empty the cluster picker — clusters in healthy
+// zones are listed and the broken zone is warned about, like every other
+// fleet listing.
+func TestListClustersToleratesBrokenZones(t *testing.T) {
+	broken := brokenAZ(t, "az-broken")
+	healthy := fakeAZ(t,
+		&vitiv1alpha1.KubernetesCluster{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "c1"}},
+		&vitiv1alpha1.KubernetesCluster{ObjectMeta: metav1.ObjectMeta{Namespace: "other", Name: "c2"}},
+	)
+
+	var warned []error
+	hits := listClusters(context.Background(),
+		[]*kube.VitistackClient{broken, healthy}, "",
+		func(e error) { warned = append(warned, e) })
+	if len(hits) != 2 {
+		t.Fatalf("hits = %d, want the healthy zone's two clusters", len(hits))
+	}
+	if len(warned) != 1 {
+		t.Errorf("warned %v, want exactly the broken zone reported", warned)
+	}
+
+	// An explicit namespace narrows the listing.
+	hits = listClusters(context.Background(),
+		[]*kube.VitistackClient{healthy}, "ns", func(error) {})
+	if len(hits) != 1 || hits[0].cluster.Name != "c1" {
+		t.Errorf("hits = %v, want only ns/c1", hits)
+	}
+}
+
+// brokenAZ is a zone whose API refuses every read — a missing CRD, denied
+// RBAC, or an unreachable API server all land here.
+func brokenAZ(t *testing.T, name string) *kube.VitistackClient {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := vitiv1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	boom := func() error { return errors.New("zone " + name + ": forbidden") }
+	c := fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(context.Context, ctrlclient.WithWatch, ctrlclient.ObjectKey, ctrlclient.Object, ...ctrlclient.GetOption) error {
+			return boom()
+		},
+		List: func(context.Context, ctrlclient.WithWatch, ctrlclient.ObjectList, ...ctrlclient.ListOption) error {
+			return boom()
+		},
+	}).Build()
+	return &kube.VitistackClient{AZ: config.AvailabilityZone{Name: name}, Ctrl: c}
+}
+
+// One broken zone (missing CRD, denied RBAC, API down) must not block rolling
+// a cluster that lives in a healthy zone — machine listings already tolerate
+// broken zones with a warning, and the cluster path must match.
+func TestScanZonesForClusterToleratesBrokenZones(t *testing.T) {
+	broken := brokenAZ(t, "az-broken")
+	healthy := fakeAZ(t, &vitiv1alpha1.KubernetesCluster{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "c1"},
+	})
+
+	var warned []error
+	az, targets, err := scanZonesForCluster(context.Background(),
+		[]*kube.VitistackClient{broken, healthy}, "", "c1",
+		func(e error) { warned = append(warned, e) })
+	if err != nil {
+		t.Fatalf("scanZonesForCluster = %v, want the cluster found in the healthy zone", err)
+	}
+	if az != healthy || len(targets) == 0 {
+		t.Errorf("az = %v targets = %d, want the healthy zone's targets", az, len(targets))
+	}
+	if len(warned) != 1 {
+		t.Errorf("warned %v, want exactly the broken zone reported", warned)
+	}
+}
+
+// A cluster found nowhere must keep reporting ErrClusterNotFound even when a
+// zone was unreadable, so a typo'd machine name falls back to its original
+// "no machine named X" guidance instead of surfacing the broken zone's error.
+func TestScanZonesForClusterNotFoundSurvivesBrokenZones(t *testing.T) {
+	broken := brokenAZ(t, "az-broken")
+	healthy := fakeAZ(t)
+
+	_, _, err := scanZonesForCluster(context.Background(),
+		[]*kube.VitistackClient{broken, healthy}, "", "no-such-cluster", func(error) {})
+	if !errors.Is(err, roll.ErrClusterNotFound) {
+		t.Fatalf("err = %v, want ErrClusterNotFound so the machine-name fallback keeps working", err)
+	}
+	if !strings.Contains(err.Error(), "az-broken") {
+		t.Errorf("err = %v, want the unreadable zone named — the cluster may live there", err)
+	}
+}
+
+// --restart pre-answers the per-VM restart question in single-machine mode;
+// it must NOT stand in for --yes on a whole-pool rollout, which cordons,
+// drains and reboots every node in the pool. Only an explicit --yes may skip
+// that confirmation.
+func TestRolloutOptionsOnlyYesSkipsConfirmation(t *testing.T) {
+	opts := rolloutOptions("large", "workers1", false, time.Minute, true, false, false)
+	if opts.skipConfirm {
+		t.Error("--restart alone skipped the whole-pool rollout confirmation")
+	}
+	opts = rolloutOptions("large", "workers1", false, time.Minute, false, false, true)
+	if !opts.skipConfirm {
+		t.Error("--yes did not skip the confirmation")
+	}
+}
+
 func TestEnsureVirtctl(t *testing.T) {
 	orig := virtctl.Binary
 	virtctl.Binary = "definitely-not-a-real-binary-anywhere"
 	defer func() { virtctl.Binary = orig }()
 
-	if err := ensureVirtctl(false); err == nil {
+	if err := ensureVirtctl(); err == nil {
 		t.Fatal("want an error when virtctl is missing and a restart is planned")
-	}
-	// --no-restart never invokes virtctl, so its absence must not block staging.
-	if err := ensureVirtctl(true); err != nil {
-		t.Fatalf("staging without restart must not need virtctl, got %v", err)
 	}
 }
