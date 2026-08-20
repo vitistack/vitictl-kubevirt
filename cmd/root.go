@@ -44,6 +44,12 @@ func NewRootCmd() *cobra.Command {
 	}
 	root.SetVersionTemplate("viti-kubevirt version {{.Version}}\n")
 	root.AddCommand(newVMCmd())
+	// migrations and orphans read the same two layers as "vm", so they take
+	// the same scope flags (--cluster, -n, -z). Each owns its own scope: the
+	// flags are per-command, and sharing one instance across sibling commands
+	// would let one invocation's parsed values leak into another's.
+	root.AddCommand(withScope(newMigrationsCmd))
+	root.AddCommand(withScope(newOrphansCmd))
 	root.AddCommand(newConfigCmd())
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newUpgradeCmd())
@@ -77,4 +83,13 @@ var errCancelled = errors.New("cancelled")
 // pipeable even when one availability zone is unreachable.
 func warn(cmd *cobra.Command, err error) {
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  %v\n", err)
+}
+
+// withScope builds a top-level command that needs the shared availability-zone
+// and cluster flags, registering them on the command the constructor returns.
+func withScope(build func(*scope) *cobra.Command) *cobra.Command {
+	s := &scope{}
+	cmd := build(s)
+	s.register(cmd)
+	return cmd
 }
