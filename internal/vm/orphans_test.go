@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,37 @@ import (
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
 )
+
+// detect runs DetectOrphans with a 15m min-age and fails the test on error,
+// which today never happens — see DetectOrphans's own doc comment — but
+// keeping the check here rather than inlined at every call site is what lets
+// that stay true without every test repeating the same boilerplate.
+func detect(
+	t *testing.T,
+	az []*kube.VitistackClient, resolver KubeVirtResolver,
+	localClusters []config.Cluster, connect LocalConnector,
+	warn func(error),
+) OrphanReport {
+	t.Helper()
+	report, err := DetectOrphans(context.Background(), az, resolver, localClusters, connect,
+		"", 15*time.Minute, time.Now(), warn)
+	if err != nil {
+		t.Fatalf("DetectOrphans() error = %v", err)
+	}
+	return report
+}
+
+// fakeConnector answers LocalConnector by cluster name, standing in for
+// kube.ConnectKubeVirt so a locally-configured cluster can be tested without
+// a real kubeconfig.
+func fakeConnector(byName map[string]*kube.KubeVirtClient) LocalConnector {
+	return func(cl config.Cluster) (*kube.KubeVirtClient, error) {
+		if kv, ok := byName[cl.Name]; ok {
+			return kv, nil
+		}
+		return nil, fmt.Errorf("no fake connection configured for %q", cl.Name)
+	}
+}
 
 // findOrphan returns the single orphan of the given kind, failing the test
 // if there is not exactly one — assertions read better against one row than
@@ -41,11 +73,7 @@ func TestDetectOrphansReportsVMWithoutMachine(t *testing.T) {
 	)
 	az := azClient(t, machine("prod", "real-machine"))
 
-	report, err := DetectOrphans(context.Background(),
-		[]*kube.VitistackClient{az}, fixedResolver{kv}, "", 15*time.Minute, time.Now(), nil)
-	if err != nil {
-		t.Fatalf("DetectOrphans() error = %v", err)
-	}
+	report := detect(t, []*kube.VitistackClient{az}, fixedResolver{kv}, nil, nil, nil)
 
 	o := findOrphan(t, report.Orphans, KindVMWithoutMachine)
 	if o.Name != "vm-ghost" || o.Namespace != "prod" {
@@ -68,11 +96,7 @@ func TestDetectOrphansReportsMachineWithoutVM(t *testing.T) {
 	kv := kvClient(t)
 	az := azClient(t, machine("prod", "solo"))
 
-	report, err := DetectOrphans(context.Background(),
-		[]*kube.VitistackClient{az}, fixedResolver{kv}, "", 15*time.Minute, time.Now(), nil)
-	if err != nil {
-		t.Fatalf("DetectOrphans() error = %v", err)
-	}
+	report := detect(t, []*kube.VitistackClient{az}, fixedResolver{kv}, nil, nil, nil)
 
 	o := findOrphan(t, report.Orphans, KindMachineWithoutVM)
 	if o.Name != "solo" || o.Namespace != "prod" {
@@ -91,11 +115,7 @@ func TestDetectOrphansReportsVMIWithoutVM(t *testing.T) {
 	)
 	az := azClient(t, machine("prod", "real-machine"))
 
-	report, err := DetectOrphans(context.Background(),
-		[]*kube.VitistackClient{az}, fixedResolver{kv}, "", 15*time.Minute, time.Now(), nil)
-	if err != nil {
-		t.Fatalf("DetectOrphans() error = %v", err)
-	}
+	report := detect(t, []*kube.VitistackClient{az}, fixedResolver{kv}, nil, nil, nil)
 
 	o := findOrphan(t, report.Orphans, KindVMIWithoutVM)
 	if o.Name != "vmi-ghost" || o.Namespace != "prod" {
@@ -113,11 +133,7 @@ func TestDetectOrphansIgnoresUnlabelledVMs(t *testing.T) {
 	)
 	az := azClient(t, machine("prod", "real-machine"))
 
-	report, err := DetectOrphans(context.Background(),
-		[]*kube.VitistackClient{az}, fixedResolver{kv}, "", 15*time.Minute, time.Now(), nil)
-	if err != nil {
-		t.Fatalf("DetectOrphans() error = %v", err)
-	}
+	report := detect(t, []*kube.VitistackClient{az}, fixedResolver{kv}, nil, nil, nil)
 	for _, o := range report.Orphans {
 		if o.Kind == KindVMWithoutMachine {
 			t.Errorf("unlabelled VM was reported as an orphan: %+v", o)
@@ -131,11 +147,7 @@ func TestDetectOrphansIgnoresVMsWithAnExistingMachine(t *testing.T) {
 	kv := kvClient(t, virtualMachine("prod", "vm-abc", "web-01"))
 	az := azClient(t, machine("prod", "web-01"))
 
-	report, err := DetectOrphans(context.Background(),
-		[]*kube.VitistackClient{az}, fixedResolver{kv}, "", 15*time.Minute, time.Now(), nil)
-	if err != nil {
-		t.Fatalf("DetectOrphans() error = %v", err)
-	}
+	report := detect(t, []*kube.VitistackClient{az}, fixedResolver{kv}, nil, nil, nil)
 	if len(report.Orphans) != 0 {
 		t.Errorf("got %d findings, want none: %+v", len(report.Orphans), report.Orphans)
 	}
@@ -160,11 +172,7 @@ func TestDetectOrphansSuppressesYoungFindings(t *testing.T) {
 	)
 	az := azClient(t, machine("prod", "real-machine"))
 
-	report, err := DetectOrphans(context.Background(),
-		[]*kube.VitistackClient{az}, fixedResolver{kv}, "", 15*time.Minute, time.Now(), nil)
-	if err != nil {
-		t.Fatalf("DetectOrphans() error = %v", err)
-	}
+	report := detect(t, []*kube.VitistackClient{az}, fixedResolver{kv}, nil, nil, nil)
 
 	if report.Suppressed != 1 {
 		t.Errorf("Suppressed = %d, want 1", report.Suppressed)
@@ -186,12 +194,8 @@ func TestDetectOrphansReportsIncompleteCoverageWhenAClusterFails(t *testing.T) {
 	az := azClient(t, machine("prod", "web-01"))
 
 	var warnings []error
-	report, err := DetectOrphans(context.Background(),
-		[]*kube.VitistackClient{az}, fixedResolver{broken}, "", 15*time.Minute, time.Now(),
+	report := detect(t, []*kube.VitistackClient{az}, fixedResolver{broken}, nil, nil,
 		func(e error) { warnings = append(warnings, e) })
-	if err != nil {
-		t.Fatalf("DetectOrphans() error = %v", err)
-	}
 
 	if report.Coverage.Complete() {
 		t.Error("Coverage.Complete() = true, want false when a cluster could not be queried")
@@ -213,11 +217,7 @@ func TestDetectOrphansReportsIncompleteCoverageWhenAClusterFails(t *testing.T) {
 func TestDetectOrphansReportsIncompleteCoverageWhenAZoneFails(t *testing.T) {
 	broken := failingAZ("broken", errors.New("dial tcp: connection refused"))
 
-	report, err := DetectOrphans(context.Background(),
-		[]*kube.VitistackClient{broken}, fixedResolver{kvClient(t)}, "", 15*time.Minute, time.Now(), nil)
-	if err != nil {
-		t.Fatalf("DetectOrphans() error = %v", err)
-	}
+	report := detect(t, []*kube.VitistackClient{broken}, fixedResolver{kvClient(t)}, nil, nil, nil)
 	if report.Coverage.Complete() {
 		t.Error("Coverage.Complete() = true, want false when a zone could not be listed")
 	}
@@ -231,11 +231,7 @@ func TestDetectOrphansReportsIncompleteCoverageWhenAZoneFails(t *testing.T) {
 func TestDetectOrphansTreatsNoCRDsZoneAsChecked(t *testing.T) {
 	bare := failingAZ("no-crds", noCRDErr())
 
-	report, err := DetectOrphans(context.Background(),
-		[]*kube.VitistackClient{bare}, fixedResolver{kvClient(t)}, "", 15*time.Minute, time.Now(), nil)
-	if err != nil {
-		t.Fatalf("DetectOrphans() error = %v", err)
-	}
+	report := detect(t, []*kube.VitistackClient{bare}, fixedResolver{kvClient(t)}, nil, nil, nil)
 	if !report.Coverage.Complete() {
 		t.Errorf("Coverage = %+v, want complete for a zone with no vitistack CRDs", report.Coverage)
 	}
@@ -250,11 +246,7 @@ func TestDetectOrphansCleanFleetHasNoFindings(t *testing.T) {
 	)
 	az := azClient(t, machine("prod", "web-01"))
 
-	report, err := DetectOrphans(context.Background(),
-		[]*kube.VitistackClient{az}, fixedResolver{kv}, "", 15*time.Minute, time.Now(), nil)
-	if err != nil {
-		t.Fatalf("DetectOrphans() error = %v", err)
-	}
+	report := detect(t, []*kube.VitistackClient{az}, fixedResolver{kv}, nil, nil, nil)
 	if len(report.Orphans) != 0 {
 		t.Errorf("got %d findings, want none: %+v", len(report.Orphans), report.Orphans)
 	}
@@ -266,5 +258,107 @@ func TestDetectOrphansCleanFleetHasNoFindings(t *testing.T) {
 	}
 	if report.Coverage.ClustersConfigured != 1 || report.Coverage.ClustersChecked != 1 {
 		t.Errorf("Coverage = %+v, want exactly 1 cluster configured and checked", report.Coverage)
+	}
+}
+
+// The whole point of the local-cluster union: a KubeVirt cluster whose last
+// Machine has already been torn down has no zone left to discover it
+// through, but it is still sitting in kubevirt.config.yaml, and its
+// labelled-but-unowned VM must still be found.
+func TestDetectOrphansAuditsUnanchoredLocalCluster(t *testing.T) {
+	kv := namedKV(t, "standalone-kv", virtualMachine("prod", "vm-ghost", "long-gone-machine"))
+	local := []config.Cluster{{Name: "standalone-kv"}}
+	connect := fakeConnector(map[string]*kube.KubeVirtClient{"standalone-kv": kv})
+
+	// No availability zone at all names this cluster — the scenario a full
+	// cluster decommission leaves behind.
+	report := detect(t, nil, fixedResolver{}, local, connect, nil)
+
+	o := findOrphan(t, report.Orphans, KindVMWithoutMachine)
+	if o.Name != "vm-ghost" || o.AZ != "" {
+		t.Errorf("got name=%q az=%q, want vm-ghost with no owning zone", o.Name, o.AZ)
+	}
+	if o.Cluster != "standalone-kv" {
+		t.Errorf("Cluster = %q, want standalone-kv", o.Cluster)
+	}
+	if !report.Coverage.Complete() {
+		t.Errorf("Coverage = %+v, want complete", report.Coverage)
+	}
+}
+
+// A cluster reachable both through zone discovery and the local config must
+// be audited once, not twice, or every finding on it would be reported
+// twice.
+func TestDetectOrphansDedupesClusterReachableBothWays(t *testing.T) {
+	kv := kvClient(t,
+		virtualMachine("prod", "vm-real", "real-machine"),
+		virtualMachine("prod", "vm-ghost", "long-gone-machine"),
+	)
+	az := azClient(t, machine("prod", "real-machine"))
+	// Same name as kv's own Cluster.Name (set by kvClient), so clusterIdentity
+	// recognises them as the same cluster.
+	local := []config.Cluster{{Name: "kv-test"}}
+	connect := fakeConnector(map[string]*kube.KubeVirtClient{"kv-test": kv})
+
+	report := detect(t, []*kube.VitistackClient{az}, fixedResolver{kv}, local, connect, nil)
+
+	findOrphan(t, report.Orphans, KindVMWithoutMachine) // fails if 0 or 2+
+	if report.Coverage.ClustersConfigured != 1 || report.Coverage.ClustersChecked != 1 {
+		t.Errorf("Coverage = %+v, want exactly 1 cluster counted, not 2", report.Coverage)
+	}
+}
+
+// An unreachable locally-configured cluster must warn and continue rather
+// than fail the command, and must count against coverage exactly like an
+// unreachable discovered one does.
+func TestDetectOrphansUnreachableLocalClusterWarnsAndCounts(t *testing.T) {
+	local := []config.Cluster{{Name: "down-kv"}}
+	connect := fakeConnector(nil) // every name misses
+
+	var warnings []error
+	report := detect(t, nil, fixedResolver{}, local, connect, func(e error) { warnings = append(warnings, e) })
+
+	if len(warnings) != 1 {
+		t.Fatalf("got %d warnings, want 1: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0].Error(), "down-kv") {
+		t.Errorf("warning %q should name the cluster", warnings[0])
+	}
+	if report.Coverage.ClustersConfigured != 1 || report.Coverage.ClustersChecked != 0 {
+		t.Errorf("Coverage = %+v, want 1 configured / 0 checked", report.Coverage)
+	}
+	if report.Coverage.Complete() {
+		t.Error("Coverage.Complete() = true, want false for an unreachable local cluster")
+	}
+}
+
+// The safety property requirement 2 exists for: when a zone could not be
+// listed, an unanchored cluster's "no Machine names this VM" cannot be
+// trusted, since the missing Machine could be sitting in the very zone that
+// was not read. The finding must not be asserted either way, and the
+// cluster must count as unaudited rather than clean.
+func TestDetectOrphansSkipsUnanchoredJudgmentWhenAZoneIsIncomplete(t *testing.T) {
+	kv := namedKV(t, "standalone-kv", virtualMachine("prod", "vm-maybe-ghost", "some-machine"))
+	local := []config.Cluster{{Name: "standalone-kv"}}
+	connect := fakeConnector(map[string]*kube.KubeVirtClient{"standalone-kv": kv})
+
+	broken := failingAZ("broken", errors.New("dial tcp: connection refused"))
+
+	var warnings []error
+	report := detect(t, []*kube.VitistackClient{broken}, fixedResolver{}, local, connect,
+		func(e error) { warnings = append(warnings, e) })
+
+	for _, o := range report.Orphans {
+		if o.Kind == KindVMWithoutMachine {
+			t.Errorf("vm-without-machine was asserted despite an unread zone: %+v", o)
+		}
+	}
+	if report.Coverage.ClustersChecked != 0 {
+		t.Errorf("ClustersChecked = %d, want 0 — the unanchored cluster's judgment could not be trusted",
+			report.Coverage.ClustersChecked)
+	}
+	if len(warnings) < 2 {
+		t.Fatalf("got %d warnings, want at least one for the zone and one for the unanchored cluster: %v",
+			len(warnings), warnings)
 	}
 }

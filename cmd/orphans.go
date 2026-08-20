@@ -75,8 +75,29 @@ finding by itself never fails the command.`,
 				return err
 			}
 
-			report, err := vm.DetectOrphans(ctx, clients, resolver, s.namespace, minAge, time.Now(),
-				func(e error) { warn(cmd, e) })
+			// The user's own locally-configured KubeVirt clusters are
+			// unioned in alongside whatever zone discovery finds: a cluster
+			// whose last Machine has already been torn down is invisible to
+			// discovery, but may still be sitting right here in
+			// kubevirt.config.yaml. A missing config file is not an error —
+			// config.Load() already treats that as "no clusters configured".
+			//
+			// --cluster skips the union: the user has already named the one
+			// cluster to look at, and every zone group is forced onto it
+			// through resolver.Override, so sweeping every other locally
+			// configured cluster too would silently widen a scope they
+			// deliberately narrowed.
+			var localClusters []config.Cluster
+			if s.cluster == "" {
+				localCfg, err := config.Load()
+				if err != nil {
+					return err
+				}
+				localClusters = localCfg.Clusters
+			}
+
+			report, err := vm.DetectOrphans(ctx, clients, resolver, localClusters, kube.ConnectKubeVirt,
+				s.namespace, minAge, time.Now(), func(e error) { warn(cmd, e) })
 			if err != nil {
 				return err
 			}
