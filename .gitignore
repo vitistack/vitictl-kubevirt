@@ -33,3 +33,6 @@ go.work.sum
 
 
 bin/
+
+# Implementation notes from tooling runs — scaffolding, not documentation.
+.reports/
