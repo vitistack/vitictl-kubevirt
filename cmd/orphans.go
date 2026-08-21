@@ -9,8 +9,8 @@ import (
 
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
-	"github.com/vitistack/vitictl/pkg/plugin/output"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
+	"github.com/vitistack/vitictl/pkg/plugin/output"
 )
 
 // newOrphansCmd is a sibling of newVMListCmd: same scope, same -o handling,

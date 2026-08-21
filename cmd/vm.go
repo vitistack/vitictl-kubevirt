@@ -14,9 +14,9 @@ import (
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
 	"github.com/vitistack/vitictl-kubevirt/internal/kubevirt"
-	"github.com/vitistack/vitictl/pkg/plugin/output"
 	"github.com/vitistack/vitictl-kubevirt/internal/viticli"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
+	"github.com/vitistack/vitictl/pkg/plugin/output"
 )
 
 // scope holds the flags every vm subcommand shares.

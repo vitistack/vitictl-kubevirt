@@ -19,9 +19,9 @@ import (
 	"github.com/vitistack/vitictl-kubevirt/internal/guest"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
 	"github.com/vitistack/vitictl-kubevirt/internal/kubevirt"
-	"github.com/vitistack/vitictl/pkg/plugin/picker"
 	"github.com/vitistack/vitictl-kubevirt/internal/roll"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
+	"github.com/vitistack/vitictl/pkg/plugin/picker"
 )
 
 // rolloutFlags carries the changemachineclass flags a rollout needs.

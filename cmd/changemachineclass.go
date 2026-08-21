@@ -14,8 +14,8 @@ import (
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
 	"github.com/vitistack/vitictl-kubevirt/internal/kubevirt"
-	"github.com/vitistack/vitictl/pkg/plugin/picker"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
+	"github.com/vitistack/vitictl/pkg/plugin/picker"
 )
 
 func newVMChangeClassCmd(s *scope) *cobra.Command {
