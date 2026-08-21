@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	kitcli "github.com/vitistack/vitictl/pkg/plugin/viticli"
 )
 
 func TestArgsCarriesTheScopeThroughToViti(t *testing.T) {
@@ -67,6 +69,9 @@ func TestMachineConsoleRunsTheBinaryWithTheRightArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
+	oldKitBinary := kitcli.Binary
+	kitcli.Binary = stub
+	defer func() { kitcli.Binary = oldKitBinary }()
 
 	var out strings.Builder
 	err := MachineConsole(context.Background(),
@@ -88,6 +93,9 @@ func TestMachineConsoleReportsAFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
+	oldKitBinary := kitcli.Binary
+	kitcli.Binary = stub
+	defer func() { kitcli.Binary = oldKitBinary }()
 
 	err := MachineConsole(context.Background(), Streams{In: strings.NewReader("")}, Target{Name: "wrk0"})
 	if err == nil {
