@@ -34,6 +34,10 @@ import (
 // variable so tests can point it at a stub instead of the real thing. The
 // actual child process is resolved and run by the kit through its own
 // Binary variable (kitcli.Binary).
+//
+// Must name the same binary as the kit's viticli.Binary — the preflight hint
+// and the actual exec must resolve identically; tests that stub one must
+// stub both.
 var Binary = "viti"
 
 // ErrNotInstalled is returned when viti is not on PATH.

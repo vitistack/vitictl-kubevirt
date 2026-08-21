@@ -69,9 +69,9 @@ func TestMachineConsoleRunsTheBinaryWithTheRightArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
-	oldKitBinary := kitcli.Binary
-	kitcli.Binary = stub
-	defer func() { kitcli.Binary = oldKitBinary }()
+	oldBinary, oldKitBinary := Binary, kitcli.Binary
+	Binary, kitcli.Binary = stub, stub
+	defer func() { Binary, kitcli.Binary = oldBinary, oldKitBinary }()
 
 	var out strings.Builder
 	err := MachineConsole(context.Background(),
@@ -93,9 +93,9 @@ func TestMachineConsoleReportsAFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
-	oldKitBinary := kitcli.Binary
-	kitcli.Binary = stub
-	defer func() { kitcli.Binary = oldKitBinary }()
+	oldBinary, oldKitBinary := Binary, kitcli.Binary
+	Binary, kitcli.Binary = stub, stub
+	defer func() { Binary, kitcli.Binary = oldBinary, oldKitBinary }()
 
 	err := MachineConsole(context.Background(), Streams{In: strings.NewReader("")}, Target{Name: "wrk0"})
 	if err == nil {
