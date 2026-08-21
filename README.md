@@ -301,11 +301,10 @@ list rather than by executing it.
 | `internal/config/`   | the plugin's cluster list, and reading viti's own config   |
 | `internal/kube/`     | clients for both cluster kinds, and KubeVirt discovery      |
 | `internal/vm/`       | the Machine ↔ VirtualMachine join and target resolution    |
-| `internal/picker/`   | the interactive fuzzy list (shared in spirit with nhn's)    |
 | `internal/virtctl/`  | shelling out to virtctl                                    |
-| `internal/viticli/`  | shelling out to viti for the Talos dashboard                |
-| `internal/output/`   | `-o` parsing, aligned tables, JSON/YAML encoding           |
-| `internal/release/`  | latest-release lookup on GitHub, version comparison        |
+| `internal/viticli/`  | domain layer over vitictl's pkg/plugin/viticli             |
+
+The picker, output, release-check and version/upgrade scaffolding come from `github.com/vitistack/vitictl/pkg/plugin` (pinned in go.mod).
 
 ### Releasing
 
