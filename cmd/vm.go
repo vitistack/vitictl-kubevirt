@@ -14,7 +14,7 @@ import (
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
 	"github.com/vitistack/vitictl-kubevirt/internal/kubevirt"
-	"github.com/vitistack/vitictl-kubevirt/internal/output"
+	"github.com/vitistack/vitictl/pkg/plugin/output"
 	"github.com/vitistack/vitictl-kubevirt/internal/viticli"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
 )

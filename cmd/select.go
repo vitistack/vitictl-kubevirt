@@ -11,7 +11,7 @@ import (
 
 	"github.com/vitistack/vitictl-kubevirt/internal/config"
 	"github.com/vitistack/vitictl-kubevirt/internal/kube"
-	"github.com/vitistack/vitictl-kubevirt/internal/picker"
+	"github.com/vitistack/vitictl/pkg/plugin/picker"
 	"github.com/vitistack/vitictl-kubevirt/internal/vm"
 )
 
