@@ -195,14 +195,16 @@ func listClusters(ctx context.Context, clients []*kube.VitistackClient,
 	return hits
 }
 
-// pickCluster opens the interactive picker over the clusters found.
-func pickCluster(cmd *cobra.Command, hits []clusterHit) (clusterHit, error) {
+// clusterItems renders the pickable clusters. Each nodepool carries its
+// CURRENT class inline — the picker is where a rollout starts, and choosing a
+// cluster without seeing its pools' classes means opening each one blind.
+func clusterItems(hits []clusterHit) []picker.Item {
 	items := make([]picker.Item, 0, len(hits))
 	for i := range hits {
 		h := &hits[i]
 		pools := make([]string, 0, len(h.cluster.Spec.Topology.Workers.NodePools))
 		for _, p := range h.cluster.Spec.Topology.Workers.NodePools {
-			pools = append(pools, p.Name)
+			pools = append(pools, p.Name+"("+dash(p.MachineClass)+")")
 		}
 		columns := []string{
 			h.cluster.Name, h.cluster.Namespace, h.az.AZ.Name,
@@ -215,8 +217,13 @@ func pickCluster(cmd *cobra.Command, hits []clusterHit) (clusterHit, error) {
 			Value:   h,
 		})
 	}
+	return items
+}
+
+// pickCluster opens the interactive picker over the clusters found.
+func pickCluster(cmd *cobra.Command, hits []clusterHit) (clusterHit, error) {
 	chosen, err := picker.Select(" Select a kubernetescluster ",
-		[]string{"NAME", "NAMESPACE", "AZ", "CP CLASS", "NODEPOOLS"}, items)
+		[]string{"NAME", "NAMESPACE", "AZ", "CP CLASS", "NODEPOOLS"}, clusterItems(hits))
 	if err != nil {
 		if errors.Is(err, picker.ErrCancelled) {
 			return clusterHit{}, errCancelled

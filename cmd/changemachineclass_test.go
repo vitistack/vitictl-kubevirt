@@ -444,6 +444,37 @@ func TestListClustersToleratesBrokenZones(t *testing.T) {
 	}
 }
 
+// The cluster picker is where a rollout starts, so its rows must carry each
+// pool's CURRENT class the same way CP CLASS carries the control plane's —
+// otherwise choosing which cluster to roll means opening each one blind.
+func TestClusterItemsShowNodepoolClasses(t *testing.T) {
+	c := &vitiv1alpha1.KubernetesCluster{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "c1"},
+		Spec: vitiv1alpha1.KubernetesClusterSpec{
+			Topology: vitiv1alpha1.KubernetesClusterSpecTopology{
+				ControlPlane: vitiv1alpha1.KubernetesClusterSpecControlPlane{MachineClass: "large"},
+				Workers: vitiv1alpha1.KubernetesClusterWorkers{
+					NodePools: []vitiv1alpha1.KubernetesClusterNodePool{
+						{Name: "workers1", MachineClass: "medium"},
+						{Name: "gpu"}, // no class set — must render as a dash, not "gpu()"
+					},
+				},
+			},
+		},
+	}
+	items := clusterItems([]clusterHit{{az: fakeAZ(t), cluster: c}})
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	pools := items[0].Columns[4]
+	if pools != "workers1(medium),gpu(-)" {
+		t.Errorf("NODEPOOLS column = %q, want %q", pools, "workers1(medium),gpu(-)")
+	}
+	if items[0].Columns[3] != "large" {
+		t.Errorf("CP CLASS column = %q, want %q", items[0].Columns[3], "large")
+	}
+}
+
 // brokenAZ is a zone whose API refuses every read — a missing CRD, denied
 // RBAC, or an unreachable API server all land here.
 func brokenAZ(t *testing.T, name string) *kube.VitistackClient {
