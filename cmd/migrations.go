@@ -245,17 +245,31 @@ type migrationJSON struct {
 	// its absence as "unattributable" without special-casing an empty string.
 	Machine   string `json:"machine,omitempty"`
 	Migration any    `json:"migration"`
+	// LiveMigrationState is the migrating instance's own status.migrationState
+	// when it belongs to this migration. The embedded migration object carries
+	// its own copy, but KubeVirt only fills that in at completion — so for an
+	// in-flight migration this is the only place the source and target nodes
+	// appear, and without it -o json would disagree with the table it sits
+	// beside. Omitted when there is nothing live to add.
+	LiveMigrationState any `json:"liveMigrationState,omitempty"`
 }
 
 func structuredMigrations(migs []vm.Migration) []migrationJSON {
 	out := make([]migrationJSON, 0, len(migs))
 	for _, m := range migs {
-		out = append(out, migrationJSON{
+		row := migrationJSON{
 			AvailabilityZone: m.AZ,
 			KubeVirtCluster:  m.Cluster,
 			Machine:          m.Machine,
 			Migration:        m.VMIM,
-		})
+		}
+		// Only when it adds something the embedded object lacks: repeating a
+		// state the migration object already carries would just be two copies
+		// of the same fact.
+		if m.VMIM.Status.MigrationState == nil && m.SourceNode() != "" {
+			row.LiveMigrationState = m.VMIState
+		}
+		out = append(out, row)
 	}
 	return out
 }
