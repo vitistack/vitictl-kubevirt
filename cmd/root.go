@@ -7,10 +7,16 @@
 package cmd
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
+
+	"github.com/vitistack/vitictl/pkg/plugin/selfupgrade"
 )
 
 // version is set by main from the -ldflags-injected build version.
@@ -51,8 +57,13 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(withScope(newMigrationsCmd))
 	root.AddCommand(withScope(newOrphansCmd))
 	root.AddCommand(newConfigCmd())
-	root.AddCommand(newVersionCmd())
-	root.AddCommand(newUpgradeCmd())
+	o := selfupgrade.Options{
+		Name:    "kubevirt",
+		Repo:    "vitistack/vitictl-kubevirt",
+		Version: version,
+	}
+	root.AddCommand(selfupgrade.NewVersionCmd(o))
+	root.AddCommand(selfupgrade.NewUpgradeCmd(o))
 	return root
 }
 
@@ -92,4 +103,29 @@ func withScope(build func(*scope) *cobra.Command) *cobra.Command {
 	cmd := build(s)
 	s.register(cmd)
 	return cmd
+}
+
+// confirm asks for a yes/no answer on the command's stdin.
+//
+// Non-interactive stdin is refused rather than assumed either way, so a
+// piped or CI invocation never performs a destructive action without having
+// been told to. --yes is the documented way through, wherever a caller offers
+// one.
+func confirm(cmd *cobra.Command, prompt string) (bool, error) {
+	// Ask the terminal directly rather than inferring from the file mode:
+	// /dev/null is a character device but is nobody's terminal, so a
+	// mode-based check waves a non-interactive invocation through and then
+	// fails on the read with a bare "EOF".
+	if in, ok := cmd.InOrStdin().(*os.File); ok && !term.IsTerminal(int(in.Fd())) {
+		return false, fmt.Errorf("stdin is not a terminal; re-run with --yes to confirm non-interactively")
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s [y/N]: ", prompt)
+
+	// A final line without a trailing newline still counts as an answer.
+	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+	if err != nil && line == "" {
+		return false, err
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
 }
