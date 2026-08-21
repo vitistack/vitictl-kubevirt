@@ -269,6 +269,8 @@ viti kubevirt upgrade
 viti kubevirt upgrade --run
 ```
 
+`vitistack/vitictl-kubevirt` is private, so `version --check` and `upgrade` need a GitHub token: set `GH_TOKEN` (or `GITHUB_TOKEN`), or run `gh auth login`.
+
 `version --check` reports a problem and still exits `0` — being offline is not
 a failure of "what version am I". `upgrade` exits non-zero, because it was
 asked to do something it could not do.
