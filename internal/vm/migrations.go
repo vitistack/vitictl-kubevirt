@@ -108,6 +108,26 @@ func (m Migration) Mode() string {
 	return string(s.Mode)
 }
 
+// Failed reports whether KubeVirt gave up on this migration, using the API's
+// own terminal phase rather than a string this package invents.
+func (m Migration) Failed() bool { return m.VMIM.Status.Phase == kubevirtv1.MigrationFailed }
+
+// FailureReason is KubeVirt's account of why a migration failed — in practice
+// the libvirt error, e.g. "internal error: client socket is closed".
+//
+// Empty is a real and distinct answer, not an oversight: a migration that
+// failed before it was ever scheduled has a migrationState carrying little
+// more than a sourcePod, and no reason at all. Observed on pos1-kv-cl01. A
+// caller must say "none recorded" rather than imply the failure was silent —
+// the reason lives in virt-controller's logs and the VMI's events instead.
+func (m Migration) FailureReason() string {
+	s := m.migrationState()
+	if s == nil {
+		return ""
+	}
+	return s.FailureReason
+}
+
 // Active reports whether the migration is still in flight.
 //
 // A rollout operator wants to see what is happening now, not the archive of
