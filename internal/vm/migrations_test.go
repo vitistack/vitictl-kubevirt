@@ -426,3 +426,60 @@ func TestCollectMigrationsWarnsAndStillListsWhenInstancesCannotBeListed(t *testi
 		t.Errorf("warnings = %v, want one naming the failed VirtualMachineInstance listing", warnings)
 	}
 }
+
+func TestMigrationFailedUsesTheAPIsTerminalPhase(t *testing.T) {
+	for _, tc := range []struct {
+		phase kubevirtv1.VirtualMachineInstanceMigrationPhase
+		want  bool
+	}{
+		{kubevirtv1.MigrationFailed, true},
+		{kubevirtv1.MigrationSucceeded, false},
+		{kubevirtv1.MigrationRunning, false},
+		{kubevirtv1.MigrationPhaseUnset, false},
+	} {
+		m := Migration{VMIM: migration("prod", "mig-1", "vm-1", tc.phase)}
+		if got := m.Failed(); got != tc.want {
+			t.Errorf("Failed() for phase %q = %v, want %v", tc.phase, got, tc.want)
+		}
+	}
+}
+
+func TestFailureReasonDoesNotBorrowAnotherMigrationsReason(t *testing.T) {
+	// Same trap as the node columns: a VMI keeps only its most recent
+	// migration's state, so an older failure must not be re-explained with a
+	// later migration's reason — or worse, handed a reason when the later one
+	// succeeded and left none.
+	const (
+		oldUID = types.UID("old-uid")
+		newUID = types.UID("new-uid")
+	)
+	old := withUID(migration("prod", "mig-old", "vm-a", kubevirtv1.MigrationFailed), oldUID)
+	old.Status.MigrationState = &kubevirtv1.VirtualMachineInstanceMigrationState{
+		MigrationUID: oldUID, Failed: true, FailureReason: "broken pipe",
+	}
+	m := Migration{
+		VMIM: old,
+		// The instance now carries the LATER migration's state.
+		VMIState: &kubevirtv1.VirtualMachineInstanceMigrationState{
+			MigrationUID: newUID, FailureReason: "something else entirely",
+		},
+	}
+	if got := m.FailureReason(); got != "broken pipe" {
+		t.Errorf("FailureReason() = %q, want the failure's own reason", got)
+	}
+}
+
+func TestFailureReasonEmptyWhenKubeVirtRecordedNone(t *testing.T) {
+	// Observed on pos1-kv-cl01: a migration that failed before being scheduled
+	// has a migrationState carrying only a sourcePod.
+	m := migration("prod", "mig-1", "vm-a", kubevirtv1.MigrationFailed)
+	m.Status.MigrationState = &kubevirtv1.VirtualMachineInstanceMigrationState{SourcePod: "virt-launcher-vm-a-abc"}
+	if got := (Migration{VMIM: m}).FailureReason(); got != "" {
+		t.Errorf("FailureReason() = %q, want empty so the caller can say none was recorded", got)
+	}
+	// And with no state at all, rather than panicking.
+	bare := Migration{VMIM: migration("prod", "mig-2", "vm-b", kubevirtv1.MigrationFailed)}
+	if got := bare.FailureReason(); got != "" {
+		t.Errorf("FailureReason() = %q, want empty", got)
+	}
+}

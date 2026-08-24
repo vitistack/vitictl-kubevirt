@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -233,7 +234,45 @@ func renderMigrations(cmd *cobra.Command, migs []vm.Migration, format output.For
 			dash(m.Phase()), node, age(m.VMIM.CreationTimestamp, now),
 		}, "\t"))
 	}
-	return output.WriteTable(out, header, rows)
+	if err := output.WriteTable(out, header, rows); err != nil {
+		return err
+	}
+	printFailureReasons(out, migs)
+	return nil
+}
+
+// printFailureReasons explains the Failed rows underneath the table.
+//
+// A footnote rather than a REASON column, because the reason is a libvirt
+// error of ~80 characters whose useful half is at the END —
+// "virError(Code=1, Domain=7, Message='internal error: client socket is
+// closed')". Any column narrow enough for a table would truncate away the
+// message and keep the error codes, which is the wrong half. Printed only
+// when something failed, so the normal case stays silent.
+//
+// Without this, PHASE=Failed is the whole story the tool tells and the reason
+// is a kubectl round-trip away, into JSON the operator has to know the shape
+// of: status.migrationState.failureReason.
+func printFailureReasons(out io.Writer, migs []vm.Migration) {
+	var failed []vm.Migration
+	for _, m := range migs {
+		if m.Failed() {
+			failed = append(failed, m)
+		}
+	}
+	if len(failed) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "\n%d failed:\n", len(failed))
+	for _, m := range failed {
+		reason := m.FailureReason()
+		if reason == "" {
+			// Distinguish "KubeVirt recorded nothing" from "the tool did not
+			// look", and point at where the answer actually lives.
+			reason = "no reason recorded by KubeVirt — check virt-controller logs and the VMI's events"
+		}
+		_, _ = fmt.Fprintf(out, "  ❌ %s/%s: %s\n", m.Namespace(), dash(m.VMIName()), reason)
+	}
 }
 
 // migrationNode renders the source and target as one column: what a rollout
