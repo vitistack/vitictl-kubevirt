@@ -43,7 +43,19 @@ upgrade.
 
 Only active migrations show by default — during a rollout you care about what
 is in flight, and finished migrations accumulate fast enough to bury the ones
-that matter. Pass --all to include Succeeded and Failed migrations too.`,
+that matter. Pass --all to include Succeeded and Failed migrations too.
+
+--all is NOT a complete history. KubeVirt garbage-collects finished
+VirtualMachineInstanceMigrations, keeping only the most recent few per VMI:
+one instance migrated 18 times in an afternoon was observed retaining 5. What
+--all can show is therefore whatever KubeVirt has not yet pruned.
+
+That matters if you are counting. Migration totals and per-node failure rates
+derived from this output are computed over a sample the cluster curates, not
+over every migration that ran — and a VMI migrated often loses its older
+records first, so the busiest hosts are exactly where the history is thinnest.
+Treat what you see as evidence that something happened, never as evidence that
+nothing else did.`,
 		Example: `  viti kubevirt migrations
   viti kubevirt mig --all
   viti kubevirt migrations --watch
@@ -78,7 +90,7 @@ that matter. Pass --all to include Succeeded and Failed migrations too.`,
 	cmd.Flags().StringVarP(&outputFlag, "output", "o", "",
 		fmt.Sprintf("output format: %s", strings.Join(output.ValidFormats, ", ")))
 	cmd.Flags().BoolVar(&all, "all", false,
-		"include finished migrations (Succeeded/Failed) as well as active ones")
+		"include finished migrations (Succeeded/Failed) as well as active ones — only those KubeVirt has not yet garbage-collected, so not a complete history")
 	cmd.Flags().BoolVar(&watch, "watch", false,
 		"re-poll and reprint until interrupted (Ctrl-C)")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second,

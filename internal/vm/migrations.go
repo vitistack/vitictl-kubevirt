@@ -152,6 +152,15 @@ func isMigrationFinished(m *kubevirtv1.VirtualMachineInstanceMigration) bool {
 // A zone or cluster that cannot be reached is passed to warn and skipped —
 // the same contract Collect follows — so one bad zone or cluster does not
 // blank the rest of the fleet.
+//
+// What comes back is never a complete history. KubeVirt garbage-collects
+// finished VirtualMachineInstanceMigrations, retaining only the most recent
+// few per VMI — a VMI migrated 18 times in one afternoon was observed keeping
+// 5. So this returns what the cluster still holds, and callers must not treat
+// it as a population: counts and per-node failure rates computed from it are
+// drawn from a sample the cluster curates, and it prunes the busiest VMIs
+// hardest. If a caller ever needs true totals, they have to be accumulated as
+// migrations happen, not reconstructed from this.
 func CollectMigrations(ctx context.Context, azClients []*kube.VitistackClient, resolver KubeVirtResolver, namespace string, warn func(error)) ([]Migration, error) {
 	var out []Migration
 	seen := make(map[string]bool)
