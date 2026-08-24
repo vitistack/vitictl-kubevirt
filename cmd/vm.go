@@ -110,7 +110,7 @@ func resolveTarget(cmd *cobra.Command, s *scope, name string) (target, error) {
 	if err != nil {
 		return target{}, fmt.Errorf("availability zone %q: %w", found.AZ.AZ.Name, err)
 	}
-	t := target{KV: kv, Machine: found.Machine, AZ: found.AZ.AZ.Name}
+	t := target{KV: kv, Machine: found.Machine, AZ: found.AZ.AZ.Name, AZClient: found.AZ}
 	t.VM, err = vm.ResolveVM(ctx, kv, found.Machine.Name, found.Machine.Namespace)
 	return t, err
 }
@@ -125,6 +125,12 @@ type target struct {
 	Machine *vitiv1alpha1.Machine
 	// AZ is the zone the Machine was found in, empty alongside a nil Machine.
 	AZ string
+	// AZClient is the connected client for that zone, kept so a command can
+	// ask the Vitistack control plane a follow-up question about the machine
+	// — vm migrate counts a cluster's control-plane nodes with it — without
+	// reconnecting to a zone resolveTarget already reached. Nil wherever
+	// Machine is nil, for the same reason.
+	AZClient *kube.VitistackClient
 }
 
 func newVMCmd() *cobra.Command {
@@ -147,7 +153,7 @@ control plane. That is the path to use when Vitistack is down: lifecycle
 actions and the consoles then need nothing but the KubeVirt cluster.`,
 	}
 	s.register(cmd)
-	cmd.AddCommand(newVMListCmd(s), newVMGetCmd(s), newVMChangeClassCmd(s))
+	cmd.AddCommand(newVMListCmd(s), newVMGetCmd(s), newVMChangeClassCmd(s), newVMMigrateCmd(s))
 	for _, a := range vmActions() {
 		cmd.AddCommand(newVMActionCmd(s, a))
 	}
