@@ -94,18 +94,28 @@ $(LOCALBIN):
 GOLANGCI_LINT     ?= $(LOCALBIN)/golangci-lint
 GOSEC             ?= $(LOCALBIN)/gosec
 GOVULNCHECK       ?= $(LOCALBIN)/govulncheck
-GOLANGCI_LINT_VER ?= v2.6.2
-GOSEC_VER         ?= v2.22.9
+# Track upstream: resolve @latest to a concrete version so the cached binaries
+# below are keyed on the real version and refresh when a new release lands.
+# Falls back to a known-good version when the module proxy is unreachable.
+GOLANGCI_LINT_VER ?= $(shell go list -m -f '{{.Version}}' github.com/golangci/golangci-lint/v2@latest 2>/dev/null)
+GOLANGCI_LINT_VER := $(or $(GOLANGCI_LINT_VER),v2.13.1)
+GOSEC_VER         ?= $(shell go list -m -f '{{.Version}}' github.com/securego/gosec/v2@latest 2>/dev/null)
+GOSEC_VER         := $(or $(GOSEC_VER),v2.28.0)
 GOVULNCHECK_VER   ?= latest
 
 .PHONY: golangci-lint
 golangci-lint: $(LOCALBIN)
-	@test -x $(GOLANGCI_LINT) || \
-		GOBIN=$(LOCALBIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VER)
+	@test -x $(GOLANGCI_LINT)-$(GOLANGCI_LINT_VER) || { \
+		GOBIN=$(LOCALBIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VER) && \
+		mv -f $(GOLANGCI_LINT) $(GOLANGCI_LINT)-$(GOLANGCI_LINT_VER); }
+	@ln -sf $(GOLANGCI_LINT)-$(GOLANGCI_LINT_VER) $(GOLANGCI_LINT)
 
 .PHONY: gosec-bin
 gosec-bin: $(LOCALBIN)
-	@test -x $(GOSEC) || GOBIN=$(LOCALBIN) go install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VER)
+	@test -x $(GOSEC)-$(GOSEC_VER) || { \
+		GOBIN=$(LOCALBIN) go install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VER) && \
+		mv -f $(GOSEC) $(GOSEC)-$(GOSEC_VER); }
+	@ln -sf $(GOSEC)-$(GOSEC_VER) $(GOSEC)
 
 .PHONY: govulncheck-bin
 govulncheck-bin: $(LOCALBIN)
