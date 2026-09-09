@@ -54,8 +54,27 @@ env:
   VERSION: ${{ github.event.release.tag_name || github.ref_name }}
 
 jobs:
+  # Hard invariant. The push trigger is scoped to v*, but the release trigger
+  # fires for a release under ANY tag name, and this workflow would then
+  # build, sign and publish under that name. vitictl's plugin manager treats
+  # a tag it cannot parse as semver as newer than everything, so a stray
+  # release becomes a fleet-wide upgrade. Proven the hard way on 2026-09-08.
+  guard:
+    name: Refuse anything that is not a vX.Y.Z tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check the tag shape
+        run: |
+          if ! printf '%s' "${VERSION}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error title=Refusing to release '${VERSION}'::not a vX.Y.Z tag (event=${{ github.event_name }}, ref=${{ github.ref }})"
+            exit 1
+          fi
+
   build-binaries:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: [guard]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
